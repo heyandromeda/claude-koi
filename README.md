@@ -2,6 +2,8 @@
 
 An interactive Japanese koi pond for the browser, built for iPhone Safari. Touch the water.
 
+**Live:** https://koi-pond-theta.vercel.app
+
 - **Tap** for a ripple, **drag** to stir, **hold** to keep pressing the surface.
 - **Feed** button scatters pellets; the koi come and eat them.
 - **Pause** stops the simulation entirely (it also stops when the tab is in the background).
