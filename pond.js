@@ -8,7 +8,7 @@ const SETTLE = 0.9995;  // pulls the surface back to rest so it never drifts
 const VISC = 0.07;      // viscosity: damps short (grid-scale) waves much faster than long ones
 const TAU = Math.PI * 2;
 
-export const PAD = 0, FLOWER = 1, LEAF = 2, FOOD = 3;
+export const PAD = 0, FLOWER = 1, LEAF = 2, FOOD = 3, STONE = 4;
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const wrap = a => a - TAU * Math.floor((a + Math.PI) / TAU); // to [-π, π)
@@ -26,9 +26,11 @@ export function rng(seed) {
 export class Water {
   constructor(w, h) {
     this.w = w; this.h = h; this.s = w + 2;
-    this.height = new Float32Array(this.s * (h + 2));
-    this.vel = new Float32Array(this.s * (h + 2));
-    this.next = new Float32Array(this.s * (h + 2));
+    const n = this.s * (h + 2);
+    this.height = new Float32Array(n);
+    this.vel = new Float32Array(n);
+    this.next = new Float32Array(n);
+    this.mask = new Float32Array(n).fill(1); // 0 where a rock stands: the surface is pinned and waves bounce off
   }
 
   // Smooth impulse centred on grid coords (gx, gy); radius in cells. Negative pushes the surface down.
@@ -44,8 +46,20 @@ export class Water {
     }
   }
 
+  // A rock standing in the water over a disc (grid units).
+  block(gx, gy, r) {
+    for (let y = Math.max(0, Math.floor(gy - r)); y <= Math.min(this.h - 1, Math.ceil(gy + r)); y++) {
+      for (let x = Math.max(0, Math.floor(gx - r)); x <= Math.min(this.w - 1, Math.ceil(gx + r)); x++) {
+        if ((x + 0.5 - gx) ** 2 + (y + 0.5 - gy) ** 2 < r * r) {
+          const i = (y + 1) * this.s + x + 1;
+          this.mask[i] = this.height[i] = this.vel[i] = 0;
+        }
+      }
+    }
+  }
+
   step() {
-    const { w, h, s, height: H, vel: V, next: N } = this, b = (h + 1) * s;
+    const { w, h, s, height: H, vel: V, next: N, mask: M } = this, b = (h + 1) * s;
     for (let x = 1; x <= w; x++) { H[x] = H[s + x]; H[b + x] = H[b - s + x]; }
     for (let y = 0; y <= h + 1; y++) { H[y * s] = H[y * s + 1]; H[y * s + w + 1] = H[y * s + w]; }
     for (let y = 1; y <= h; y++) {
@@ -53,11 +67,11 @@ export class Water {
         // isotropic 9-point Laplacian keeps rings round instead of squarish
         const lap = (4 * (H[i - 1] + H[i + 1] + H[i - s] + H[i + s])
           + H[i - s - 1] + H[i - s + 1] + H[i + s - 1] + H[i + s + 1] - 20 * H[i]) / 6;
-        N[i] = (V[i] + C2 * lap + VISC * (V[i - 1] + V[i + 1] + V[i - s] + V[i + s] - 4 * V[i])) * DAMP;
+        N[i] = (V[i] + C2 * lap + VISC * (V[i - 1] + V[i + 1] + V[i - s] + V[i + s] - 4 * V[i])) * DAMP * M[i];
       }
     }
     for (let y = 1; y <= h; y++) {
-      for (let i = y * s + 1, e = i + w; i < e; i++) H[i] = (H[i] + N[i]) * SETTLE;
+      for (let i = y * s + 1, e = i + w; i < e; i++) H[i] = (H[i] + N[i]) * SETTLE * M[i];
     }
     this.vel = N; this.next = V;
   }
@@ -82,9 +96,10 @@ export class Koi {
       dir: rand() * TAU, speed: len * 0.4, turn: 0, fear: 0, fleeX: 0, fleeY: 0,
       depth: 0.3 + rand() * 0.3, gulp: 0, gulped: false,
       phase: rand() * TAU, fin: rand() * TAU, t: rand() * 100,
+      beat: 1, beating: true, swim: 1, fins: 0.5, mood: 1, moodT: rand() * 8,
       // incommensurate wander frequencies so no two fish (or two laps) look alike
       f1: 0.05 + rand() * 0.07, f2: 0.13 + rand() * 0.12, f3: 0.02 + rand() * 0.03,
-      p1: rand() * TAU, p2: rand() * TAU, pace: 0.38 + rand() * 0.3,
+      p1: rand() * TAU, p2: rand() * TAU, cruise: 0.45 + rand() * 0.25,
     });
   }
 
@@ -94,19 +109,33 @@ export class Koi {
     const fx = Math.cos(this.dir), fy = Math.sin(this.dir);
     let sx = fx, sy = fy;
 
-    // walls: look ahead so turning starts early and smoothly
+    // moods: mostly cruising, sometimes dawdling, now and then hovering low to nose about the bed
+    if ((this.moodT -= dt) < 0) {
+      const r = this.rand();
+      this.mood = r < 0.55 ? 1 : r < 0.82 ? 0.45 : 0.08;
+      this.moodT = 5 + this.rand() * 12;
+    }
+
+    // walls and rocks: look ahead so turning starts early and smoothly
     const m = Math.min(L * 1.5, Math.min(w, h) * 0.3);
     const ax = this.x + fx * L * 0.7, ay = this.y + fy * L * 0.7;
-    sx += 2.5 * (Math.max(0, m - ax) - Math.max(0, ax - (w - m))) / m;
-    sy += 2.5 * (Math.max(0, m - ay) - Math.max(0, ay - (h - m))) / m;
+    sx += (2.5 * (Math.max(0, m - ax) - Math.max(0, ax - (w - m)))) / m;
+    sy += (2.5 * (Math.max(0, m - ay) - Math.max(0, ay - (h - m)))) / m;
+    for (const s of pond.stones) {
+      const ox = ax - s.x, oy = ay - s.y, r = s.r + L * 0.6, d = Math.hypot(ox, oy);
+      if (d < r && d > 1e-6) { sx += (ox / d) * 2.5 * (1 - d / r); sy += (oy / d) * 2.5 * (1 - d / r); }
+    }
 
-    // keep some personal space from fish at a similar depth
+    // neighbours at a similar depth: keep some personal space, loosely match heading
     for (const o of pond.koi) {
       if (o === this) continue;
-      const ox = this.x - o.x, oy = this.y - o.y, r = (L + o.len) * 0.45, d2 = ox * ox + oy * oy;
+      const ox = this.x - o.x, oy = this.y - o.y, d2 = ox * ox + oy * oy;
+      const same = 1 - Math.abs(this.depth - o.depth), r = (L + o.len) * 0.45;
       if (d2 < r * r && d2 > 1e-6) {
-        const d = Math.sqrt(d2), k = (1 - d / r) * 0.9 * (1 - Math.abs(this.depth - o.depth));
+        const d = Math.sqrt(d2), k = (1 - d / r) * 0.9 * same;
         sx += (ox / d) * k; sy += (oy / d) * k;
+      } else if (d2 < 6 * L * L) {
+        sx += Math.cos(o.dir) * 0.15 * same; sy += Math.sin(o.dir) * 0.15 * same;
       }
     }
 
@@ -124,7 +153,7 @@ export class Koi {
         if (d2 < best) { best = d2; food = f; }
       }
     }
-    let target = L * this.pace * (0.7 + 0.3 * Math.sin(this.t * this.f3 * TAU + this.p2));
+    let target = L * this.cruise * this.mood * (0.8 + 0.2 * Math.sin(this.t * this.f3 * TAU + this.p2));
     if (food) {
       const d = Math.sqrt(best);
       if (d < L * 0.2) { pond.eat(food, this); food = null; } else {
@@ -134,26 +163,42 @@ export class Koi {
     }
     target += this.fear * L * 3.2;
 
-    const wander = (Math.sin(this.t * this.f1 * TAU + this.p1) * 0.6 + Math.sin(this.t * this.f2 * TAU + this.p2) * 0.4) * 0.6;
+    const wander = (Math.sin(this.t * this.f1 * TAU + this.p1) * 0.6 + Math.sin(this.t * this.f2 * TAU + this.p2) * 0.4) * (0.25 + 0.35 * this.mood);
     const maxTurn = 1.3 + this.fear * 3 + (food ? 1 : 0);
     const want = clamp(wrap(Math.atan2(sy, sx) - this.dir) * 2.2 + wander, -maxTurn, maxTurn);
     this.turn += (want - this.turn) * Math.min(1, dt * 2.5);
     this.dir = wrap(this.dir + this.turn * dt);
 
-    const accel = target > this.speed ? (this.fear > 0.3 ? 6 : 1.2) : 0.8;
-    this.speed += (target - this.speed) * Math.min(1, dt * accel);
+    // thrust comes in bursts of tail beats with glides in between; a scared fish just goes
+    if (this.fear > 0.3) this.beating = true;
+    else if (this.beating ? this.speed > target * 1.1 : this.speed < target * 0.75) this.beating = !this.beating;
+    this.beat += ((this.beating ? 1 : 0) - this.beat) * Math.min(1, dt * 5);
+    const k = 0.35 + this.fear * 3;
+    this.speed += k * (target * 1.6 * this.beat - this.speed) * dt;
+    // pectoral fins brake when going too fast, and scull to hover
+    const brake = clamp((this.speed - target) / (L * 0.5), 0, 1);
+    if (!this.beating) this.speed -= brake * L * 0.5 * dt;
+    this.speed = clamp(this.speed, 0, L * 5);
+    this.fins += (clamp(brake + (1 - this.mood) * 0.7 + Math.abs(this.turn) * 0.25, 0, 1) * (1 - this.fear) - this.fins) * Math.min(1, dt * 3);
+
     const sp = this.speed * (1 - Math.min(0.45, Math.abs(this.turn) * 0.18)); // slow into tight turns
     this.x = clamp(this.x + Math.cos(this.dir) * sp * dt, 2, w - 2);
     this.y = clamp(this.y + Math.sin(this.dir) * sp * dt, 2, h - 2);
+    for (const s of pond.stones) {
+      const ox = this.x - s.x, oy = this.y - s.y, d = Math.hypot(ox, oy) || 1, r = s.r + L * 0.08;
+      if (d < r) { this.x = s.x + (ox / d) * r; this.y = s.y + (oy / d) * r; }
+    }
 
     this.fear *= Math.exp(-dt * 1.3);
-    this.phase += dt * (2.5 + (9 * sp) / L);          // tail beat quickens with speed
-    this.fin += dt * (5 - 3 * Math.min(1, sp / L));    // fins paddle more when hovering
+    const drive = Math.min(2.5, (target * 1.6) / L);
+    this.swim = (0.15 + 0.85 * this.beat) * (0.55 + 0.45 * Math.min(1, drive)) + this.fear * 0.3;
+    this.phase += dt * (3 + 8 * drive) * (0.3 + 0.7 * this.beat); // tail beats quicken with effort
+    this.fin += dt * (2 + 4 * this.fins);
 
-    // drift in depth; now and then rise to the surface for a gulp
+    // depth: hovering fish go low; now and then one rises to gulp at the surface
     if (this.gulp > 0) this.gulp -= dt;
     else if (this.rand() < dt / 35) { this.gulp = 2.2; this.gulped = false; }
-    const goal = this.gulp > 0 ? 0.03 : 0.38 + 0.2 * Math.sin(this.t * this.f3 * 4 + this.p1);
+    const goal = this.gulp > 0 ? 0.03 : this.mood < 0.2 ? 0.62 : 0.36 + 0.18 * Math.sin(this.t * this.f3 * 4 + this.p1);
     this.depth += (goal - this.depth) * Math.min(1, dt * 0.8);
     if (this.gulp > 0 && !this.gulped && this.depth < 0.08) {
       this.gulped = true;
@@ -161,15 +206,16 @@ export class Koi {
     }
   }
 
-  // Spine from snout to tail tip as [x, y, angle] triples (angle points tailward).
-  spine(nb, nt, out) {
-    const L = this.len, body = 0.76;
-    const curv = clamp(this.turn / Math.max(this.speed, L * 0.3), -2.5 / L, 2.5 / L);
-    const swim = 0.45 + 0.55 * Math.min(1, this.speed / L);
+  // Spine from snout to tail tip as [x, y, angle] triples (angle points tailward); z scales the fish.
+  spine(nb, nt, out, z = 1) {
+    const L = this.len * z, body = 0.76;
+    const bend = clamp((this.turn / Math.max(this.speed, this.len * 0.3)) * this.len, -2, 2); // radians over the length; more and the tail folds over itself
     let x = this.x, y = this.y;
     for (let i = 0; i <= nb + nt; i++) {
       const s = i <= nb ? (i / nb) * body : body + ((i - nb) / nt) * (1 - body);
-      const a = this.dir + Math.PI - curv * s * L + (0.03 + 0.42 * s * s) * swim * Math.sin(this.phase - s * 5.5);
+      // the tail fin is flexible, so it trails the body wave
+      const flex = s > body ? ((s - body) / (1 - body)) * 0.35 * Math.sin(this.phase - s * 5.5 - 0.9) : 0;
+      const a = this.dir + Math.PI - bend * s + ((0.03 + 0.4 * s * s) * Math.sin(this.phase - s * 5.5) + flex) * this.swim;
       out[i * 3] = x; out[i * 3 + 1] = y; out[i * 3 + 2] = a;
       const ds = (i < nb ? body / nb : (1 - body) / nt) * L;
       x += Math.cos(a) * ds; y += Math.sin(a) * ds;
@@ -182,7 +228,7 @@ export class Pond {
   constructor(w, h, seed = 7) {
     this.rand = rng(seed);
     this.time = 0; this.acc = 0; this.drip = 2;
-    this.food = []; this.g = [0, 0];
+    this.food = []; this.stones = []; this.g = [0, 0];
     this.resize(w, h);
     this.populate();
   }
@@ -192,13 +238,27 @@ export class Pond {
     this.w = w; this.h = h;
     this.cell = Math.max(2, Math.min(w, h) / 180);
     this.water = new Water(Math.ceil(w / this.cell), Math.ceil(h / this.cell));
-    for (const o of [...(this.koi || []), ...(this.pads || []), ...(this.leaves || []), ...this.food]) {
+    for (const o of [...(this.koi || []), ...(this.pads || []), ...(this.leaves || []), ...this.food, ...this.stones]) {
       o.x = clamp(o.x * sx, 2, w - 2); o.y = clamp(o.y * sy, 2, h - 2);
     }
+    this.carve();
+  }
+
+  // the water hugs the rock a little inside its drawn outline, so waves lap right up to it
+  carve() {
+    for (const s of this.stones) this.water.block(s.x / this.cell, s.y / this.cell, (s.r * 0.85) / this.cell);
   }
 
   populate() {
     const { w, h, rand } = this, m = Math.min(w, h);
+    // a rock breaking the surface near one wall, with a smaller one beside it
+    const big = clamp(m * 0.1, 26, 70), side = rand() < 0.5 ? -1 : 1;
+    const rx = w / 2 + side * (w / 2 - big * 1.4), ry = h * (0.2 + 0.6 * rand());
+    this.stones = [
+      { x: rx, y: ry, r: big, seed: rand() },
+      { x: rx - side * big * 1.5, y: ry + big * (rand() < 0.5 ? 1.3 : -1.3), r: big * 0.55, seed: rand() },
+    ];
+    this.carve();
     const base = clamp(m * 0.22, 60, 190);
     this.koi = [];
     for (let i = 0; i < 7; i++) {
@@ -209,7 +269,7 @@ export class Pond {
     for (let tries = 0; this.pads.length < want && tries < 400; tries++) {
       const r = Math.min(70, m * (0.07 + 0.05 * rand())), x = r + rand() * (w - 2 * r), y = r + rand() * (h - 2 * r);
       if (Math.hypot((x - w / 2) / w, (y - h / 2) / h) < 0.22 && rand() < 0.85) continue; // keep the centre open
-      if (this.pads.some(p => Math.hypot(p.x - x, p.y - y) < p.r + r + 6)) continue;
+      if ([...this.pads, ...this.stones].some(p => Math.hypot(p.x - x, p.y - y) < p.r + r + 6)) continue;
       this.pads.push(this.floater(PAD, x, y, r));
     }
     this.flowers = this.pads.slice(0, 2).map(pad => ({ pad, seed: rand() }));
@@ -230,7 +290,13 @@ export class Pond {
     for (const k of this.koi) {
       const dx = k.x - x, dy = k.y - y, d = Math.hypot(dx, dy) || 1, R = Math.max(130, k.len * 1.8);
       const s = strength * (1 - d / R) * (1.15 - k.depth);
-      if (s > k.fear) { k.fear = s; k.fleeX = dx / d; k.fleeY = dy / d; }
+      if (s > k.fear) {
+        if (s > 0.4 && s > k.fear + 0.2) { // C-start: whip the body round and bolt
+          k.turn = clamp(wrap(Math.atan2(dy, dx) - k.dir) * 4, -5, 5);
+          k.beating = true; k.beat = 1; k.speed += k.len * s;
+        }
+        k.fear = s; k.fleeX = dx / d; k.fleeY = dy / d;
+      }
     }
   }
 
@@ -305,6 +371,14 @@ export class Pond {
       f.vr *= Math.exp(-dt * 0.6);
       f.rot += f.vr * dt;
       f.age += dt;
+      for (const s of this.stones) { // rocks don't move: slide around them
+        const dx = f.x - s.x, dy = f.y - s.y, d = Math.hypot(dx, dy) || 1, rr = f.r + s.r;
+        if (d < rr) {
+          f.x = s.x + (dx / d) * rr; f.y = s.y + (dy / d) * rr;
+          const vn = (f.vx * dx + f.vy * dy) / d;
+          if (vn < 0) { f.vx -= (vn * dx) / d; f.vy -= (vn * dy) / d; }
+        }
+      }
     }
     // floating things nudge each other apart instead of overlapping
     for (let i = 0; i < all.length; i++) {

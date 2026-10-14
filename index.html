@@ -23,7 +23,7 @@
   .ui button:active { transform: scale(.92); }
   .ui button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
   .ui svg { width: 18px; height: 18px; fill: currentColor; }
-  #hint { position: fixed; left: 0; right: 0; bottom: max(28px, calc(env(safe-area-inset-bottom) + 12px)); text-align: center;
+  #hint { position: fixed; left: 0; right: 0; bottom: calc(max(16px, env(safe-area-inset-bottom)) + 60px); text-align: center;
     color: rgba(255, 255, 255, .78); letter-spacing: .04em; pointer-events: none; transition: opacity 1.2s;
     text-shadow: 0 1px 6px rgba(0, 0, 0, .4); }
   #hint.gone { opacity: 0; }
@@ -43,22 +43,22 @@
 </div>
 <div id="err">This pond needs WebGL 2. Try the latest Safari or Chrome.</div>
 <script type="module">
-import { Pond, PAD, FLOWER, LEAF, FOOD } from './pond.js';
+import { Pond, PAD, FLOWER, LEAF, FOOD, STONE } from './pond.js';
 
 const canvas = document.getElementById('pond');
 const hint = document.getElementById('hint');
 const MAX_RATIO = 2;          // beyond 2x the extra pixels cost battery and nobody can see them
 const LIGHT = [26, 34];       // px offset of shadows cast by objects at the surface
 
-// Koi varieties: base, patch, spots, fins, [patch threshold, spot threshold, metallic, tancho]
+// Koi varieties: base, patch, spots, fins (rgb + how dark the fin roots are), [patch threshold, spot threshold, metallic, tancho]
 const KOI = [
-  { c0: [.97, .95, .91], c1: [.92, .24, .06], c2: [0, 0, 0], fin: [.97, .96, .93], p: [.5, 9, .1, 0] },        // Kohaku
-  { c0: [.97, .95, .91], c1: [.9, .2, .05], c2: [.04, .04, .05], fin: [.95, .95, .93], p: [.5, .76, .1, 0] },   // Sanke
-  { c0: [.05, .05, .06], c1: [.92, .3, .07], c2: [.96, .94, .9], fin: [.25, .25, .27], p: [.56, .72, .15, 0] }, // Showa
-  { c0: [1, .79, .26], c1: [0, 0, 0], c2: [0, 0, 0], fin: [1, .85, .45], p: [9, 9, 1, 0] },                     // Yamabuki Ogon
-  { c0: [.97, .96, .93], c1: [.9, .12, .06], c2: [0, 0, 0], fin: [.97, .96, .94], p: [9, 9, .15, 1] },         // Tancho
-  { c0: [1, .5, .1], c1: [0, 0, 0], c2: [0, 0, 0], fin: [1, .62, .28], p: [9, 9, .8, 0] },                     // Orenji Ogon
-  { c0: [.05, .05, .06], c1: [.96, .95, .92], c2: [0, 0, 0], fin: [.75, .75, .75], p: [.53, 9, .1, 0] },       // Shiro Utsuri
+  { c0: [.97, .95, .91], c1: [.92, .24, .06], c2: [0, 0, 0], fin: [.97, .96, .93, 0], p: [.5, 9, .1, 0] },         // Kohaku
+  { c0: [.97, .95, .91], c1: [.9, .2, .05], c2: [.04, .04, .05], fin: [.95, .95, .93, 0], p: [.5, .76, .1, 0] },   // Sanke
+  { c0: [.05, .05, .06], c1: [.92, .3, .07], c2: [.96, .94, .9], fin: [.93, .91, .87, 1], p: [.56, .72, .15, 0] }, // Showa
+  { c0: [1, .79, .26], c1: [0, 0, 0], c2: [0, 0, 0], fin: [1, .85, .45, 0], p: [9, 9, 1, 0] },                      // Yamabuki Ogon
+  { c0: [.97, .96, .93], c1: [.9, .12, .06], c2: [0, 0, 0], fin: [.97, .96, .94, 0], p: [9, 9, .15, 1] },          // Tancho
+  { c0: [1, .5, .1], c1: [0, 0, 0], c2: [0, 0, 0], fin: [1, .62, .28, 0], p: [9, 9, .8, 0] },                      // Orenji Ogon
+  { c0: [.05, .05, .06], c1: [.96, .95, .92], c2: [0, 0, 0], fin: [.9, .9, .88, .8], p: [.53, 9, .1, 0] },         // Shiro Utsuri
 ];
 
 // ---------- shaders ----------
@@ -76,8 +76,17 @@ float fbm(vec2 p) { float s = 0., a = .5; for (int i = 0; i < 5; i++) { s += a *
 `;
 const UNDERWATER = `
 uniform float u_time;
+uniform vec2 u_res;
+uniform sampler2D u_canopy;
 const vec3 WATER = vec3(.02, .29, .31);
+const vec3 LD = normalize(vec3(-.45, -.6, .55));   // toward the sun: high, top-left
 vec3 absorb(vec3 c, float d) { vec3 T = exp(-vec3(1.6, .52, .42) * d); return c * T + WATER * (1. - T); }
+// Sun let through the maple canopy (1 = full sun) at a point d below the surface. A leaf's shadow lands
+// further down-light the deeper it falls, so bed, fish and pads each see the dapples shifted.
+float sunlight(vec2 p, float d) {
+  vec2 q = (p - vec2(26, 34) * d) / (max(u_res.x, u_res.y) * 1.6) + .18 + .004 * vec2(sin(u_time * .31), cos(u_time * .23));
+  return 1. - .5 * texture(u_canopy, q).a;
+}
 // Cheap animated caustic net (after Dave Hoskins' tileable water caustic).
 float caustic(vec2 p) {
   float time = u_time * .5 + 23.;
@@ -116,90 +125,113 @@ void main() {
   v_p = vec2(c.x, 1. - c.y) * u_res;
 }`;
 
-// One-off: pebbles, sand, moss and rocks. rgb = albedo, a = water depth.
+// One-off: the pond bed (silty sand, gravel, pebbles, sunken leaves, boulders). rgb = albedo, a = water depth.
 const FS_FLOORGEN = `${HEAD}${NOISE}
 uniform vec2 u_res;
+uniform vec3 u_rocks[4];   // rocks breaking the surface (x, y, radius); their bases sit on the bed
 in vec2 v_p; out vec4 o;
-// F1, F2, cell id; c = nearest feature point
-vec3 voro(vec2 x, out vec2 c) {
-  vec2 n = floor(x), f = fract(x);
-  float f1 = 8., f2 = 8., id = 0.;
+const vec3 LD = normalize(vec3(-.45, -.6, .55));
+// Rounded stones on a jittered grid, unioned over neighbouring cells so none gets clipped.
+// x: coverage, y: lighting, z: id, w: contact shadow on whatever lies beneath
+vec4 stones(vec2 p, float sc, float dens, float seed) {
+  vec2 q = p / sc, n = floor(q);
+  vec4 r = vec4(0, 1, 0, 1);
+  float top = 0.;
   for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
-    vec2 g = vec2(i, j), r = g + vec2(hash(n + g), hash(n + g + 19.7)) * .85 - f;
-    float d = dot(r, r);
-    if (d < f1) { f2 = f1; f1 = d; id = hash(n + g + 3.1); c = x + r; } else if (d < f2) f2 = d;
+    vec2 g = n + vec2(i, j);
+    if (hash(g + seed) > dens) continue;
+    vec2 c = g + .5 + (vec2(hash(g + seed + 7.1), hash(g + seed + 3.7)) - .5) * .5, o2 = q - c;
+    float rad = .24 + .2 * hash(g + seed + 1.3), a = hash(g + seed + 9.2) * 6.283;
+    vec2 d = vec2(o2.x * cos(a) + o2.y * sin(a), (o2.y * cos(a) - o2.x * sin(a)) * (1.15 + .5 * hash(g + seed + 5.5)));
+    float e = length(d) / rad, z = sqrt(max(0., 1. - e * e));
+    r.w = min(r.w, mix(.64, 1., smoothstep(.8, 1.3, length(o2 - vec2(.1, .14)) / rad)));
+    if (e < 1. && z > top) {
+      top = z;
+      r.xyz = vec3(smoothstep(1., .86, e), .52 + .6 * max(dot(normalize(vec3(o2 / rad, z * 1.4)), LD), 0.), hash(g + seed + 2.9));
+    }
   }
-  return vec3(sqrt(f1), sqrt(f2), id);
+  return r;
 }
-vec2 warp(vec2 q) { return q + .3 * vec2(vnoise(q * .7), vnoise(q * .7 + 5.)); }
-// Boulders hugging the pond wall: x = coverage, y = lighting, z = height
-vec3 boulder(vec2 p, float m) {
-  vec2 c;
-  float sc = m * .26;
-  vec3 v = voro(p / sc + 2.7, c);
-  vec2 cp = (c - 2.7) * sc;
-  float wall = min(min(cp.x, u_res.x - cp.x), min(cp.y, u_res.y - cp.y));
-  float r0 = .42 + .07 * vnoise(p / 14.);
-  float on = step(.3, v.z) * step(wall, m * .1);
-  vec2 off = (p / sc + 2.7 - c) / r0;
-  float rr = length(off);
-  vec3 n = vec3(off, sqrt(max(0., 1. - rr * rr)) * 1.2);
-  float lit = clamp(dot(normalize(n), normalize(vec3(-.5, -.6, .7))), 0., 1.);
-  return vec3(on * smoothstep(1.03, .97, rr), .35 + .9 * lit, 1. - rr);
+vec3 stoneColour(float id, vec2 p) {
+  vec3 c = id < .3 ? vec3(.36, .37, .39) : id < .55 ? vec3(.53, .46, .36) : id < .72 ? vec3(.19, .19, .2) : id < .9 ? vec3(.46, .32, .22) : vec3(.74, .72, .66);
+  return c * (.85 + .3 * vnoise(p / 1.6)) * (.9 + .2 * fract(id * 17.));
+}
+// A boulder dome: keeps the highest one, darkens whatever its shadow falls on.
+void dome(vec2 d, float wobble, inout float top, inout vec3 nrm, inout float sh) {
+  float e = length(d) * (1. + wobble), z = sqrt(max(0., 1. - e * e));
+  sh = min(sh, mix(.48, 1., smoothstep(.9, 1.3, length(d - vec2(.12, .16)))));
+  if (e < 1. && z > top) { top = z; nrm = normalize(vec3(d, z * 1.1)); }
 }
 void main() {
-  vec2 p = v_p, c;
+  vec2 p = v_p;
   float m = min(u_res.x, u_res.y);
-  vec2 q = p / 10.;
-  vec3 v = voro(warp(q), c);
-  float e = v.y - v.x;
-  float shade = clamp(1. + 2.5 * (voro(warp(q - vec2(.06, .08)), c).x - v.x), .6, 1.3); // domes lit from top-left
-  vec3 peb = mix(mix(vec3(.32, .3, .27), vec3(.24, .24, .25), step(.5, v.z)),
-                 mix(vec3(.4, .36, .3), vec3(.17, .16, .15), step(.5, fract(v.z * 7.))), step(.6, fract(v.z * 3.1)));
-  peb *= (.85 + .3 * fract(v.z * 13.)) * shade * (1. - .35 * v.x);
-  vec3 col = mix(vec3(.14, .12, .1), mix(peb, vec3(.29, .27, .24), .3), smoothstep(.02, .12, e));
-  float silt = smoothstep(.4, .62, fbm(p / 130.));
-  col = mix(col, vec3(.34, .31, .23) * (.85 + .3 * vnoise(p / 3.)), silt * .8);
-  float moss = smoothstep(.52, .7, fbm(p / 95. + 9.));
-  col = mix(col, vec3(.16, .25, .09) * (.7 + .5 * vnoise(p / 4.)), moss * .7);
-  vec3 bd = boulder(p, m);
-  col *= 1. - .45 * boulder(p - vec2(9, 12), m).x * (1. - bd.x);             // boulders shade the floor
-  vec3 rock = vec3(.43, .42, .39) * (.7 + .45 * fbm(p / 6.)) * bd.y;
-  rock = mix(rock, vec3(.2, .3, .1) * bd.y, smoothstep(.55, .7, fbm(p / 16. + 2.)) * .8);
-  col = mix(col, rock, bd.x);
   float edge = min(min(p.x, u_res.x - p.x), min(p.y, u_res.y - p.y));
-  float depth = .58 + .42 * smoothstep(0., m * .4, edge) + .12 * (fbm(p / 220.) - .5);
-  o = vec4(col, clamp(depth - bd.x * (.25 + .25 * bd.z) - silt * .06, .12, 1.));
+  // silty sand: mottled, faintly ripple-marked, with dark detritus
+  vec3 col = mix(vec3(.4, .35, .26), vec3(.55, .49, .37), fbm(p / 45.)) * (.92 + .16 * vnoise(p / 2.5));
+  col *= .94 + .08 * sin(dot(p, vec2(.12, .05)) + fbm(p / 60.) * 9.);
+  col = mix(col, vec3(.2, .17, .11), smoothstep(.55, .75, fbm(p / 110. + 4.)) * .55);
+  // gravel, pebbles, cobbles; density varies so the bed has sandy and stony stretches
+  float bed = smoothstep(.3, .7, fbm(p / 170. + 11.));
+  vec4 s = stones(p, 5., .1 + .45 * bed, 1.);
+  col = mix(col * s.w, stoneColour(s.z, p) * s.y, s.x);
+  s = stones(p, 14., .08 + .62 * bed, 2.);
+  col = mix(col * s.w, stoneColour(s.z, p) * s.y, s.x);
+  s = stones(p, 36., .3 * bed, 3.);
+  col = mix(col * s.w, stoneColour(s.z, p) * s.y, s.x);
+  col = mix(col, vec3(.2, .26, .12) * (.8 + .4 * vnoise(p / 3.)), smoothstep(.45, .75, fbm(p / 80. + 9.)) * .45); // algae film
+  // the odd sunken leaf
+  vec2 lc = floor(p / 150.);
+  if (hash(lc + 41.) < .45) {
+    float a = hash(lc + 44.) * 6.283;
+    vec2 d = p - (lc + .2 + .6 * vec2(hash(lc + 42.), hash(lc + 43.))) * 150.;
+    d = vec2(d.x * cos(a) + d.y * sin(a), d.y * cos(a) - d.x * sin(a)) / (9. + 6. * hash(lc + 45.));
+    float rr = .5 + .45 * pow(abs(cos((atan(d.y, d.x) + 1.5708) * 2.5)), .9);
+    col = mix(col, mix(vec3(.3, .17, .09), vec3(.5, .26, .08), hash(lc + 46.)) * (.8 + .3 * vnoise(d * 5.)), smoothstep(rr + .06, rr - .06, length(d)) * .85);
+  }
+  // boulders along the walls, and the bases of the rocks that break the surface
+  float bsc = m * .24, top = 0., sh = 1., wob = .14 * (vnoise(p / 11.) - .5);
+  vec3 nrm = vec3(0, 0, 1);
+  vec2 bq = p / bsc, bc = floor(bq);
+  for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+    vec2 g = bc + vec2(i, j), c = g + .5 + (vec2(hash(g + 61.), hash(g + 62.)) - .5) * .6, cp = c * bsc;
+    if (min(min(cp.x, u_res.x - cp.x), min(cp.y, u_res.y - cp.y)) > m * .1 || hash(g + 63.) > .75) continue;
+    dome((bq - c) / (.42 + .2 * hash(g + 64.)), wob, top, nrm, sh);
+  }
+  for (int i = 0; i < 4; i++) if (u_rocks[i].z > 0.) dome((p - u_rocks[i].xy) / (u_rocks[i].z * 1.45), wob, top, nrm, sh);
+  vec3 rock = vec3(.46, .45, .42) * (.72 + .45 * fbm(p / 7.)) * (.9 + .2 * vnoise(p / 1.5));
+  rock = mix(rock, vec3(.2, .3, .1) * (.75 + .4 * vnoise(p / 3.)), smoothstep(.5, .66, fbm(p / 18. + 2.)) * nrm.z * .9);
+  col = mix(col * sh, rock * (.32 + .9 * max(dot(nrm, LD), 0.)), smoothstep(0., .1, top));
+  float depth = .55 + .45 * smoothstep(0., m * .42, edge) + .1 * (fbm(p / 230.) - .5) - top * .45;
+  col = mix(col, vec3(.36, .33, .26), clamp(depth, 0., 1.) * .25);   // fine detail fades into the murk with depth
+  o = vec4(col, clamp(depth, .08, 1.));
 }`;
 
-// One-off: overhanging maples and sky, seen in reflections.
+// One-off: overhanging maples and sky (rgb, seen in reflections) and a dappled-shade mask (a).
 const FS_CANOPY = `${HEAD}${NOISE}
 uniform vec2 u_res;
 in vec2 v_p; out vec4 o;
 void main() {
   vec2 uv = v_p / u_res;
   float r = length(uv - .5) * 2.;
-  float leaves = fbm(uv * 7.) + .45 * vnoise(uv * 55.) - .2;
-  float cover = smoothstep(.47, .55, leaves + (r - .6) * .8);
+  float cover = smoothstep(.47, .55, fbm(uv * 7.) + .45 * vnoise(uv * 55.) - .2 + (r - .6) * .8);
   vec3 sky = mix(vec3(.95, .98, 1.), vec3(.6, .78, .9), clamp(r * .7, 0., 1.));
   vec3 maple = mix(vec3(.6, .1, .05), vec3(.88, .45, .1), vnoise(uv * 18.));
-  vec3 leaf = mix(vec3(.1, .22, .1), maple, smoothstep(.42, .6, fbm(uv * 3. + 4.)));
-  leaf *= .5 + .6 * vnoise(uv * 90.);
-  o = vec4(mix(sky, leaf, cover), 1.);
+  vec3 leaf = mix(vec3(.1, .22, .1), maple, smoothstep(.42, .6, fbm(uv * 3. + 4.))) * (.5 + .6 * vnoise(uv * 90.));
+  float shade = smoothstep(.5, .66, fbm(uv * 4.5 + 20.) + .3 * vnoise(uv * 40. + 3.)) * smoothstep(.25, .6, fbm(uv * 1.5 + 7.));
+  o = vec4(mix(sky, leaf, cover), shade);
 }`;
 
-// Per frame, underwater: floor lit by caustics that the real ripples focus and bend.
+// Per frame, underwater: the bed in dappled sun, with caustics the real ripples focus and bend.
 const FS_FLOOR = `${HEAD}${UNDERWATER}${WATERFN}
-uniform vec2 u_res;
 uniform sampler2D u_floor;
 in vec2 v_p; out vec4 o;
 ${SV}
 void main() {
   vec4 f = texture(u_floor, sv(v_p));
   vec3 d = waterD(v_p);
-  float c = caustic(v_p + d.xy * 140.);
-  float focus = clamp(1. - d.z * 14., .2, 3.5);   // crests focus sunlight, troughs spread it
-  vec3 light = vec3(.5) + vec3(1., .97, .88) * focus * (.32 + c * 1.25 * (1.2 - f.a * .5));
+  float c = caustic(v_p + d.xy * 140.) * (1.25 - f.a * .55);   // sharper in the shallows
+  float focus = clamp(1. - d.z * 14., .2, 3.5);                 // crests focus sunlight, troughs spread it
+  vec3 light = vec3(.4, .45, .48) + vec3(1., .96, .86) * sunlight(v_p, f.a) * focus * (.38 + c * 1.3);
   o = vec4(absorb(f.rgb * light, f.a), 1.);
 }`;
 
@@ -207,91 +239,116 @@ const VS_KOI = `${HEAD}
 layout(location = 0) in vec2 a_pos;
 layout(location = 1) in vec2 a_uv;
 layout(location = 2) in vec2 a_info;
+layout(location = 3) in vec2 a_dir;
 uniform vec2 u_res, u_light;
 uniform float u_shadow, u_depth[8];
-out vec2 v_uv, v_p;
+out vec2 v_uv, v_p, v_dir;
 flat out int v_k, v_part;
 void main() {
   v_part = int(a_info.x + .5); v_k = int(a_info.y + .5);
   vec2 p = a_pos + u_shadow * u_light * (1.1 - u_depth[v_k]);
-  v_uv = a_uv; v_p = p;
+  v_uv = a_uv; v_p = p; v_dir = a_dir;
   gl_Position = vec4((p / u_res * 2. - 1.) * vec2(1, -1), 0., 1.);
 }`;
 
+// Koi parts: 0 body, 1 tail, 2 paired fins, 3 dorsal fin. uv = (t along, s across in body half-widths).
 const FS_KOI = `${HEAD}${NOISE}${UNDERWATER}
-uniform vec3 u_c0[8], u_c1[8], u_c2[8], u_fin[8];
-uniform vec4 u_kp[8];
+uniform vec3 u_c0[8], u_c1[8], u_c2[8];
+uniform vec4 u_fin[8], u_kp[8];
 uniform float u_shadow, u_depth[8];
-in vec2 v_uv, v_p;
+in vec2 v_uv, v_p, v_dir;
 flat in int v_k, v_part;
 out vec4 o;
-float bodyW(float t) { return t < .3 ? sqrt(max(0., 1. - pow((.3 - t) / .3, 2.))) : 1. - .82 * pow((t - .3) / .7, 1.2); }
+float bodyW(float t) { return t < .3 ? sqrt(max(0., 1. - pow((.3 - t) / .3, 2.))) : 1. - .84 * pow((t - .3) / .7, 1.15); }
 float fbm3(vec2 p) { return .5 * vnoise(p) + .3 * vnoise(p * 2.1 + 7.) + .2 * vnoise(p * 4.3 + 3.); }
 void main() {
-  float t = v_uv.x, s = v_uv.y;
-  float half_ = v_part == 0 ? bodyW(t) : v_part == 1 ? .1 + .8 * t : .3 + .7 * t;
+  int k = v_k;
+  float t = v_uv.x, s = v_uv.y, dep = u_depth[k];
+  float half_ = v_part == 0 ? bodyW(t) : v_part == 1 ? .1 + .8 * t : v_part == 2 ? .3 + .7 * t : .2 * sqrt(max(0., sin(3.1416 * t)));
   float d = abs(s) - half_;
-  float extra = v_part == 1 ? t - (.7 + .3 * abs(s) / max(half_, .01))   // forked tail
+  float extra = v_part == 1 ? t - (.74 + .26 * abs(s) / max(half_, .01))   // forked tail
               : v_part == 2 ? length(vec2(t, s * .6)) - 1. : -1.;          // rounded fin tip
   if (u_shadow > .5) {
-    float a = smoothstep(.3, -.3, d) * smoothstep(.15, -.15, extra) * (v_part == 0 ? .34 : .14);
+    float soft = .2 + .8 * (1. - dep);   // nearer the surface means further from the bed: softer, fainter
+    float a = v_part == 3 ? 0. : smoothstep(soft, -soft, d) * smoothstep(.15, -.15, extra) * (v_part == 0 ? .44 - .2 * (1. - dep) : .12);
     o = vec4(0, 0, 0, a);
     return;
   }
-  float alpha = clamp(.5 - d / (fwidth(s) + 1e-4), 0., 1.) * clamp(.5 - extra / (fwidth(t) + 1e-4), 0., 1.);
+  float blur = 1. + dep * 2.5;           // deeper fish sit slightly out of focus
+  float alpha = clamp(.5 - d / (fwidth(s) * blur + 1e-4), 0., 1.) * clamp(.5 - extra / (fwidth(t) * blur + 1e-4), 0., 1.);
   if (alpha <= 0.) discard;
-  int k = v_k;
+  vec2 side = vec2(-v_dir.y, v_dir.x);   // the fish's left, on screen
   vec4 kp = u_kp[k];
   vec3 col;
+  float spec = 0.;
   if (v_part == 0) {
+    float sn = clamp(s / max(half_, .05), -1., 1.);
+    vec3 N = normalize(vec3(side * sn * .9, sqrt(1. - sn * sn)));
+    // staggered scale lattice; the head and the edges of the flanks are smooth
+    vec2 sc = vec2(t * 23., s * 3.3);
+    sc.y += .5 * mod(floor(sc.x), 2.);
+    float rim = smoothstep(.28, .5, length((fract(sc) - .5) * vec2(1.25, 1.)));
+    float gill = .2 + .07 * sn * sn;
+    float scaled = smoothstep(gill, gill + .04, t) * smoothstep(1., .75, abs(sn)) * clamp(1.5 - fwidth(sc.x) * 2.5, 0., 1.);
+    float edge = (rim - .5) * scaled;      // pattern edges follow the scales
     vec2 pc = vec2(t * 3.2, s * .9) + float(k) * 13.7;
-    col = mix(u_c0[k], u_c1[k], smoothstep(kp.x - .025, kp.x + .025, fbm3(pc)));
-    col = mix(col, u_c2[k], smoothstep(kp.y - .03, kp.y + .03, vnoise(pc * 2.6 + 31.)));
-    if (kp.w > .5) col = mix(u_c0[k], u_c1[k], smoothstep(.5, .45, length(vec2((t - .15) * 4., s))));
-    col = mix(u_c0[k], col, smoothstep(.02, .07, t));       // clean snout
-    float sn = clamp(s / max(half_, .05), -1., 1.), cyl = sqrt(1. - sn * sn);
-    float scales = .5 + .5 * sin(t * 95. + floor(s * 7.) * 1.6) * sin(s * 21.);
-    float ridge = smoothstep(.09, 0., abs(s)) * smoothstep(.28, .35, t) * smoothstep(.68, .6, t);
-    col *= (.48 + .58 * cyl) * (1. - .07 * scales) * (1. - .22 * ridge);
-    col += vec3(1, .95, .85) * pow(cyl, 12.) * (.1 + .55 * kp.z) * (1. + scales * kp.z);
-    float eye = length(vec2((t - .085) * 4.6, abs(s) - .48));
-    col = mix(col, vec3(.03), smoothstep(.1, .07, eye));
+    col = mix(u_c0[k], u_c1[k], smoothstep(kp.x - .02, kp.x + .02, fbm3(pc) + edge * .05));
+    col = mix(col, u_c2[k], smoothstep(kp.y - .03, kp.y + .03, vnoise(pc * 2.6 + 31.) + edge * .04));
+    if (kp.w > .5) col = mix(u_c0[k], u_c1[k], smoothstep(.5, .45, length(vec2((t - .14) * 4., s))));
+    col = mix(u_c0[k], col, smoothstep(.02, .07, t));                                    // clean snout
+    col *= 1. - .13 * rim * scaled * (1. - .4 * kp.z);
+    col *= 1. - .3 * smoothstep(.022, 0., abs(t - gill)) * smoothstep(.95, .4, abs(sn));   // gill cover
+    col *= .4 + .72 * max(dot(N, LD), 0.);
+    spec = pow(max(dot(N, normalize(LD + vec3(0, 0, 1))), 0.), 24. + 50. * kp.z) * (.22 + .6 * kp.z) * (1. + .8 * kp.z * (1. - rim) * scaled);
+    // eyes bulge from the sides of the head
+    vec2 e = vec2((t - .1) * 6.9, s - sign(s) * .6);   // in body half-widths: tailward, leftward
+    float er = length(e);
+    col = mix(col, mix(vec3(.02), vec3(.5, .38, .16), smoothstep(.055, .1, er)), smoothstep(.15, .12, er));
+    vec2 lo = normalize(LD.xy) * .045;
+    spec += smoothstep(.045, .015, length(e - vec2(dot(lo, v_dir), dot(lo, side)))) * .9;
   } else {
-    float ray = .82 + .18 * sin(atan(s, t + .2) * 30.);
-    col = u_fin[k] * ray;
-    alpha *= (v_part == 1 ? .82 : .72) * mix(1., .5, smoothstep(.4, 1., t));
+    // fins: translucent membranes with rays fanning from the root
+    float ray = v_part == 3 ? .8 + .2 * cos(t * 55.) : .8 + .2 * cos(atan(s * (v_part == 1 ? .46 : .42), t + .1) * 34.);
+    vec4 fc = u_fin[k];
+    col = mix(fc.rgb, u_c0[k], fc.w * smoothstep(.5, .1, t)) * ray * .85;   // motoguro: dark fin roots
+    alpha *= v_part == 3 ? .7 : (v_part == 1 ? .8 : .72) * mix(1., .45, smoothstep(.35, 1., t));
   }
-  float dep = u_depth[k];
-  col *= .78 + caustic(v_p) * .9 * (1.1 - dep);
+  float sun = sunlight(v_p, dep);
+  col *= .62 + sun * (.45 + caustic(v_p) * .7 * (1.1 - dep));
+  col += spec * sun * mix(vec3(1., .97, .9), u_c0[k], kp.z * .7);   // metallic scales reflect tinted
   o = vec4(absorb(col, dep * .55) * alpha, alpha);
 }`;
 
 // Per frame, to screen: refraction, reflection, sun glints.
-const FS_WATER = `${HEAD}${WATERFN}
-uniform vec2 u_res;
-uniform float u_time, u_slope;
-uniform sampler2D u_scene, u_canopy;
+const FS_WATER = `${HEAD}${NOISE}${UNDERWATER}${WATERFN}
+uniform float u_slope;
+uniform sampler2D u_scene, u_floor;
 in vec2 v_p; out vec4 o;
 ${SV}
+// slope of the wavelet a*sin(k.p - w*t)
+vec2 wave(vec2 p, vec2 k, float a, float w) { return k * a * cos(dot(k, p) - w * u_time); }
+// wind chop: two layers of noise drifting different ways; only its slope is used
+float chop(vec2 p) { return vnoise(p * .1 + vec2(.9, .35) * u_time) + .7 * vnoise(p * .16 + vec2(-.3, .8) * u_time); }
 void main() {
   vec2 p = v_p;
-  vec3 d = waterD(p);
-  vec2 g = d.xy * u_slope;
-  // wind: a few faint travelling wavelets keep the surface alive
-  vec2 k1 = vec2(.05, .021), k2 = vec2(-.023, .061), k3 = vec2(.071, -.043);
-  float t = u_time;
-  g += k1 * cos(dot(k1, p) - t * 1.9) * .2 + k2 * cos(dot(k2, p) - t * 2.3) * .16 + k3 * cos(dot(k3, p) - t * 2.9) * .09;
-  vec3 n = normalize(vec3(-g, 1.));
-  vec2 off = -n.xy * 30.;
+  vec2 g = waterD(p).xy * u_slope;
+  // a faint swell everywhere, and cat's-paws: patches of wind-ruffle drifting across the pond
+  g += wave(p, vec2(.05, .021), .2, 1.9) + wave(p, vec2(-.023, .061), .16, 2.3) + wave(p, vec2(.071, -.043), .09, 2.9);
+  vec2 gq = p * .005 + vec2(.04, .017) * u_time;
+  float gust = smoothstep(.55, .8, .65 * vnoise(gq) + .35 * vnoise(gq * 2.3 + 5.));
+  vec2 ch = gust * .3 * vec2(chop(p + vec2(1, 0)) - chop(p - vec2(1, 0)), chop(p + vec2(0, 1)) - chop(p - vec2(0, 1)));
+  vec3 n = normalize(vec3(-g - ch, 1.));
+  // the deeper the water, the more the bed shifts; tiny chop sparkles more than it bends the view
+  vec2 off = (g + ch * .35) * (10. + 34. * texture(u_floor, sv(p)).a);
   vec3 under = vec3(texture(u_scene, sv(p + off)).r, texture(u_scene, sv(p + off * 1.03)).g, texture(u_scene, sv(p + off * 1.06)).b);
   vec3 V = normalize(vec3((p - u_res * .5) / max(u_res.x, u_res.y) * .8, -1.));
   vec3 R = reflect(V, n);
   vec3 env = texture(u_canopy, R.xy / R.z * .75 + .5).rgb;
-  float F = .02 + .98 * pow(1. - max(dot(-V, n), 0.), 5.);
-  vec3 col = mix(under, env, clamp(F * 2.5 + .07, 0., 1.));
+  float F = .03 + .97 * pow(1. - max(dot(-V, n), 0.), 5.);
+  vec3 col = under * (1. - F) + env * env * 3. * F;   // squared: the sky is far brighter than the leaves against it
   vec3 L = normalize(vec3(-.4, -.55, 1.));
-  float sp = max(dot(R, L), 0.), sun = smoothstep(.55, .85, dot(env, vec3(.33)));
-  col += vec3(1., .96, .88) * (pow(sp, 900.) * 3.5 + pow(sp, 80.) * .12) * sun;
+  float sp = max(dot(R, L), 0.), sky = smoothstep(.55, .85, dot(env, vec3(.33)));
+  col += vec3(1., .96, .88) * (pow(sp, 900.) * 3.5 + pow(sp, 80.) * .1) * sky * sunlight(p, 0.);
   float edge = min(min(p.x, u_res.x - p.x), min(p.y, u_res.y - p.y));
   col *= .8 + .2 * smoothstep(0., 80., edge);
   o = vec4(col, 1.);
@@ -303,30 +360,43 @@ layout(location = 1) in vec2 a_uv;
 layout(location = 2) in vec4 a_info;
 uniform vec2 u_res, u_light;
 uniform float u_shadow;
-out vec2 v_uv;
+out vec2 v_uv, v_p;
 flat out vec4 v_info;
 void main() {
   vec2 p = a_pos + u_shadow * u_light * 1.25;
-  v_uv = a_uv; v_info = a_info;
+  v_uv = a_uv; v_p = p; v_info = a_info;
   gl_Position = vec4((p / u_res * 2. - 1.) * vec2(1, -1), 0., 1.);
 }`;
 
-const FS_SURF = `${HEAD}${NOISE}
+const FS_SURF = `${HEAD}${NOISE}${UNDERWATER}
 uniform float u_shadow;
-in vec2 v_uv;
+in vec2 v_uv, v_p;
 flat in vec4 v_info;
 out vec4 o;
 void main() {
   vec2 uv = v_uv;
   float r = length(uv), a = atan(uv.y, uv.x), aa = fwidth(r) + 1e-4;
+  vec2 l2 = normalize(dFdx(uv) * LD.x - dFdy(uv) * LD.y);   // toward the sun, in this quad's own frame
   int type = int(v_info.x + .5);
-  float seed = v_info.y;
-  vec2 tilt = v_info.zw;
-  float lit = 1. + dot(tilt, vec2(-.5, -.7)) * 4.;
-  float shape, alpha;
+  float seed = v_info.y, alpha;
   vec3 col;
-  if (type == 0) {                                   // lily pad
-    shape = .93 + .02 * sin(a * 9. + seed * 40.) - r;
+  if (type == 4) {                                    // rock breaking the surface
+    float edge = .88 + .06 * sin(a * 3. + seed * 10.) + .04 * sin(a * 7. + seed * 30.), e = r / edge;
+    alpha = clamp((edge - r) / aa + .5, 0., 1.);
+    if (u_shadow > .5) { o = vec4(0, 0, 0, smoothstep(1.15, .8, e) * .5); return; }
+    vec3 n = normalize(vec3(uv / edge, sqrt(max(0., 1. - e * e)) * 1.2));
+    col = vec3(.5, .49, .46) * (.72 + .45 * fbm(uv * 5. + seed * 20.)) * (.88 + .24 * vnoise(uv * 38.));
+    col = mix(col, vec3(.24, .34, .13) * (.8 + .4 * vnoise(uv * 22.)), smoothstep(.52, .68, fbm(uv * 2.5 + seed * 7.)) * smoothstep(.75, .3, e));
+    col *= mix(1., .5, smoothstep(.72, .96, e));      // wet and dark at the waterline
+    col *= (.32 + .9 * max(dot(n, LD), 0.)) * (.45 + .55 * sunlight(v_p, 0.));
+    col += .3 * pow(max(dot(n, normalize(LD + vec3(0, 0, 1))), 0.), 30.) * smoothstep(.6, .92, e);
+    float ring = smoothstep(1.14, 1., e) * (1. - alpha) * .35;
+    o = vec4(col * alpha, alpha + ring * (1. - alpha));
+    return;
+  }
+  float lit = (1. - dot(v_info.zw, LD.xy) * 5.) * (.45 + .55 * sunlight(v_p, 0.));   // tilted by the waves, dappled by the trees
+  if (type == 0) {                                    // lily pad
+    float shape = .93 + .02 * sin(a * 9. + seed * 40.) - r;
     float notch = r * (.2 - abs(a)) * step(.05, r);
     alpha = clamp(shape / aa + .5, 0., 1.) * clamp(.5 - notch / aa, 0., 1.);
     if (u_shadow > .5) { o = vec4(0, 0, 0, smoothstep(-.25, .2, shape) * .4); return; }
@@ -334,37 +404,43 @@ void main() {
     float vein = abs(fract(a * 2.07 + .5) - .5) / 2.07 * r;
     col *= 1. + .16 * smoothstep(.022, .0, vein) * smoothstep(.12, .3, r);
     col = mix(col, vec3(.45, .38, .14), smoothstep(.74, .86, vnoise(uv * 3. + seed * 50.)) * .55);
-    col = mix(col, vec3(.48, .58, .22), smoothstep(-.12, -.02, -shape) * .45);   // curled rim
-    col *= lit * (.92 + .16 * dot(uv, vec2(-.5, -.7)));
-    col += .1 * pow(max(0., 1. - length(uv - vec2(-.35, -.45)) * 1.3), 3.);        // waxy sheen
-    float ring = smoothstep(.1, 0., -shape) * (1. - alpha) * .3;                    // wet meniscus
+    col = mix(col, seed > .6 ? vec3(.5, .16, .1) : vec3(.48, .58, .22), smoothstep(-.12, -.02, -shape) * .45); // curled rim
+    col *= lit * (.92 + .16 * dot(uv, l2));
+    col += .1 * pow(max(0., 1. - length(uv - l2 * .45) * 1.3), 3.);                                       // waxy sheen
+    // beads of water sitting on the pad
+    vec2 dq = uv * 4. + seed * 31., dc = floor(dq);
+    vec2 dd = (fract(dq) - .5 - (vec2(hash(dc + 1.), hash(dc + 2.)) - .5) * .4) / (.18 + .12 * hash(dc + 3.));
+    if (hash(dc) > .86 && r < .78) {
+      float bead = smoothstep(1., .85, length(dd));
+      col *= mix(.72, 1., smoothstep(.8, 1.2, length(dd + l2 * .5)));
+      col = mix(col, col * 1.2 + .05, bead) + bead * .8 * smoothstep(.4, .1, length(dd - l2 * .45));
+    }
+    float ring = smoothstep(.1, 0., -shape) * (1. - alpha) * .3;                                          // wet meniscus
     o = vec4(col * alpha, alpha + ring * (1. - alpha));
     return;
   }
-  if (u_shadow > .5 && type != 1) { o = vec4(0); return; }
-  if (type == 1) {                                   // lotus
+  if (type == 1) {                                    // water lily
     float p1 = .58 + .4 * pow(abs(cos(a * 4.)), .6), p2 = .32 + .32 * pow(abs(cos(a * 4. + 1.5708)), .6);
     float outer = clamp((p1 - r) / aa + .5, 0., 1.), inner = clamp((p2 - r) / aa + .5, 0., 1.);
     alpha = max(outer, inner);
-    if (u_shadow > .5) { o = vec4(0, 0, 0, smoothstep(.3, -.1, r - p1) * .3); return; }
-    vec3 pink = vec3(.97, .55, .7), white = vec3(1, .95, .96);
-    col = mix(white, pink, smoothstep(.25, 1., r / p1)) * (.82 + .18 * abs(cos(a * 4.)));
+    vec3 pink = vec3(.97, .55, .7);
+    col = mix(vec3(1, .95, .96), pink, smoothstep(.25, 1., r / p1)) * (.82 + .18 * abs(cos(a * 4.)));
     col = mix(col, mix(vec3(1, .97, .97), pink, smoothstep(.1, 1., r / p2) * .7) * (.85 + .15 * abs(sin(a * 4.))), inner);
     col = mix(col, vec3(1, .78, .2) * (.85 + .3 * vnoise(uv * 30.)), smoothstep(.15, .12, r));
-    col *= lit;
-  } else if (type == 2) {                            // maple leaf
+  } else if (type == 2) {                             // maple leaf
     float b = a + 1.5708;
     float rr = .5 + .45 * pow(abs(cos(b * 2.5)), .9) + .02 * sin(b * 40.);
     float stem = step(0., uv.y) * step(uv.y, .95) * smoothstep(.05, .02, abs(uv.x));
     alpha = max(clamp((rr - r) / aa + .5, 0., 1.), stem);
     col = mix(mix(vec3(.75, .1, .04), vec3(.92, .42, .08), seed), vec3(.88, .62, .12), step(.75, seed));
-    col *= (.8 + .3 * smoothstep(.1, 0., abs(sin(b * 2.5)) * r)) * lit * (.9 + .2 * vnoise(uv * 8. + seed * 9.));
+    col *= (.8 + .3 * smoothstep(.1, 0., abs(sin(b * 2.5)) * r)) * (.9 + .2 * vnoise(uv * 8. + seed * 9.));
     col = mix(col, col * .6, stem);
-  } else {                                           // food pellet
+  } else {                                            // food pellet
     alpha = clamp((.8 - r) / aa + .5, 0., 1.);
-    col = vec3(.52, .33, .15) * (.75 + .5 * smoothstep(.6, 0., length(uv - vec2(-.3, -.3))));
+    col = vec3(.52, .33, .15) * (.75 + .5 * smoothstep(.6, 0., length(uv - l2 * .3)));
   }
-  o = vec4(col * alpha, alpha);
+  if (u_shadow > .5) { o = vec4(0, 0, 0, alpha * .3); return; }
+  o = vec4(col * lit * alpha, alpha);
 }`;
 
 // ---------- GL plumbing ----------
@@ -426,7 +502,7 @@ function initGL() {
     floorGen: program(VS_FULL, FS_FLOORGEN), canopyGen: program(VS_FULL, FS_CANOPY),
     floor: program(VS_FULL, FS_FLOOR), koi: program(VS_KOI, FS_KOI),
     water: program(VS_FULL, FS_WATER), surf: program(VS_SURF, FS_SURF),
-    empty: gl.createVertexArray(), koiGeo: geometry(6, [2, 2, 2]), surfGeo: geometry(8, [2, 2, 4]),
+    empty: gl.createVertexArray(), koiGeo: geometry(8, [2, 2, 2, 2]), surfGeo: geometry(8, [2, 2, 4]),
   };
   R.canopy = target(512, 512);
   draw(R.canopyGen, R.canopy, { u_res: [512, 512] });
@@ -434,7 +510,7 @@ function initGL() {
   gl.useProgram(k.p);
   const flat = key => KOI.flatMap(v => v[key]).concat(new Array((8 - KOI.length) * KOI[0][key].length).fill(0));
   gl.uniform3fv(k.u.u_c0, flat('c0')); gl.uniform3fv(k.u.u_c1, flat('c1'));
-  gl.uniform3fv(k.u.u_c2, flat('c2')); gl.uniform3fv(k.u.u_fin, flat('fin'));
+  gl.uniform3fv(k.u.u_c2, flat('c2')); gl.uniform4fv(k.u.u_fin, flat('fin'));
   gl.uniform4fv(k.u.u_kp, flat('p'));
   gl.disable(gl.DEPTH_TEST);
   gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // everything outputs premultiplied alpha
@@ -445,23 +521,29 @@ function uniforms(prog, values) {
     const loc = prog.u[name], v = values[name];
     if (loc === undefined) continue;
     if (typeof v === 'number') gl.uniform1f(loc, v);
+    else if (name === 'u_rocks') gl.uniform3fv(loc, v);
     else if (v.length === 2) gl.uniform2fv(loc, v);
     else if (v.length === 4) gl.uniform4fv(loc, v);
     else gl.uniform1fv(loc, v);
   }
 }
 
-// Fullscreen pass; textures bound to units in the order given.
-function draw(prog, tgt, values, textures = {}) {
-  gl.bindFramebuffer(gl.FRAMEBUFFER, tgt ? tgt.fb : null);
-  gl.viewport(0, 0, tgt ? tgt.w : canvas.width, tgt ? tgt.h : canvas.height);
-  gl.useProgram(prog.p);
-  uniforms(prog, values);
-  Object.entries(textures).forEach(([name, tex], i) => {
+// Binds textures to units in the order given.
+function textures(prog, map) {
+  Object.entries(map).forEach(([name, tex], i) => {
     gl.activeTexture(gl.TEXTURE0 + i);
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.uniform1i(prog.u[name], i);
   });
+}
+
+// Fullscreen pass.
+function draw(prog, tgt, values, texs = {}) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, tgt ? tgt.fb : null);
+  gl.viewport(0, 0, tgt ? tgt.w : canvas.width, tgt ? tgt.h : canvas.height);
+  gl.useProgram(prog.p);
+  uniforms(prog, values);
+  textures(prog, texs);
   gl.bindVertexArray(R.empty);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 }
@@ -489,45 +571,54 @@ function resize() {
     for (const t of [R.scene, R.floorTex]) if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
     R.scene = target(bw, bh);
     R.floorTex = target(bw, bh);
-    draw(R.floorGen, R.floorTex, { u_res: [cssW, cssH] });
+    const rocks = pond.stones.flatMap(r => [r.x, r.y, r.r]).concat(Array(12).fill(0)).slice(0, 12);
+    draw(R.floorGen, R.floorTex, { u_res: [cssW, cssH], u_rocks: rocks });
   }
 }
 
 // ---------- geometry built each frame ----------
-const NB = 20, NT = 5, FINS = [[.2, .2, .085, 1, .35], [.56, .12, .05, .7, .12]]; // t, length, width, spread, flap
-const spine = new Float32Array((NB + NT + 1) * 3), row = new Float32Array((NB + 1) * 8);
-const kv = new Float32Array(8 * 200 * 6), sv = new Float32Array(128 * 6 * 8);
+const NB = 20, NT = 6, ND = 6;
+// paired fins: position along the body, length, half-width, how far they swing (pectorals scull, pelvics barely)
+const FINS = [[.2, .21, .09, 1], [.56, .12, .05, .45]];
+const spine = new Float32Array((NB + NT + 1) * 3), row = new Float32Array((NB + 1) * 10);
+const kv = new Float32Array(8 * 240 * 8), sv = new Float32Array(128 * 6 * 8);
 let kn = 0, sn = 0;
-const bodyW = t => t < .3 ? Math.sqrt(Math.max(0, 1 - ((.3 - t) / .3) ** 2)) : 1 - .82 * ((t - .3) / .7) ** 1.2;
+const bodyW = t => t < .3 ? Math.sqrt(Math.max(0, 1 - ((.3 - t) / .3) ** 2)) : 1 - .84 * ((t - .3) / .7) ** 1.15;
 
+// One cross-section of a strip: vertices px either side of (x, y), across angle a; plus the strip's direction.
 function setRow(i, x, y, a, half, px, u) {
-  const nx = -Math.sin(a) * px, ny = Math.cos(a) * px, o = i * 8;
-  row[o] = x + nx; row[o + 1] = y + ny; row[o + 2] = u; row[o + 3] = half;
-  row[o + 4] = x - nx; row[o + 5] = y - ny; row[o + 6] = u; row[o + 7] = -half;
+  const c = Math.cos(a), s = Math.sin(a), o = i * 10;
+  row[o] = x - s * px; row[o + 1] = y + c * px; row[o + 2] = u; row[o + 3] = half;
+  row[o + 4] = x + s * px; row[o + 5] = y - c * px; row[o + 6] = u; row[o + 7] = -half;
+  row[o + 8] = c; row[o + 9] = s;
 }
-function put(o, part, k) {
-  const d = kn++ * 6;
-  kv[d] = row[o]; kv[d + 1] = row[o + 1]; kv[d + 2] = row[o + 2]; kv[d + 3] = row[o + 3]; kv[d + 4] = part; kv[d + 5] = k;
+function put(o, d, part, k) {
+  const v = kn++ * 8;
+  kv[v] = row[o]; kv[v + 1] = row[o + 1]; kv[v + 2] = row[o + 2]; kv[v + 3] = row[o + 3];
+  kv[v + 4] = part; kv[v + 5] = k; kv[v + 6] = row[d]; kv[v + 7] = row[d + 1];
 }
 function strip(rows, part, k) {
   for (let i = 0; i < rows - 1; i++) {
-    const a = i * 8, b = a + 8;
-    put(a, part, k); put(a + 4, part, k); put(b, part, k);
-    put(a + 4, part, k); put(b + 4, part, k); put(b, part, k);
+    const a = i * 10, b = a + 10;
+    put(a, a + 8, part, k); put(a + 4, a + 8, part, k); put(b, b + 8, part, k);
+    put(a + 4, a + 8, part, k); put(b + 4, b + 8, part, k); put(b, b + 8, part, k);
   }
 }
 
 function buildKoi() {
   kn = 0;
   for (const k of pond.koi.slice().sort((a, b) => b.depth - a.depth)) {
-    const L = k.len, W = L * .11, ki = k.variety;
-    k.spine(NB, NT, spine);
-    for (const [t, fl, fw, spread, flap] of FINS) {
+    const z = 1 + .12 * (.45 - k.depth);   // nearer the surface reads a touch larger
+    const L = k.len * z, W = L * .11, ki = k.variety;
+    k.spine(NB, NT, spine, z);
+    for (const [t, fl, fw, mob] of FINS) {
       const j = Math.round(t * NB) * 3, a = spine[j + 2];
       for (const side of [-1, 1]) {
-        const off = bodyW(t) * W * .75 * side;
+        const off = bodyW(t) * W * .8 * side;
         const x = spine[j] - Math.sin(a) * off, y = spine[j + 1] + Math.cos(a) * off;
-        const fa = a + side * (spread + flap * Math.sin(k.fin + side * .8));
+        // tucked in to cruise, spread to brake or hover; the fin on the inside of a turn opens wider
+        const open = .35 + .9 * k.fins + .35 * Math.max(0, -side * k.turn);
+        const fa = a + side * mob * (open + .25 * Math.sin(k.fin + side * .8) * (.3 + .7 * k.fins));
         setRow(0, x, y, fa, 1, fw * L, 0);
         setRow(1, x + Math.cos(fa) * fl * L, y + Math.sin(fa) * fl * L, fa, 1, fw * L, 1);
         strip(2, 2, ki);
@@ -543,6 +634,16 @@ function buildKoi() {
       setRow(i, spine[j], spine[j + 1], spine[j + 2], half, half * W, t);
     }
     strip(NB + 1, 0, ki);
+    // dorsal fin along the back, leaning side to side a beat behind the body
+    for (let i = 0; i <= ND; i++) {
+      const f = (.32 + .3 * i / ND) * NB, j = Math.floor(f) * 3, fr = f % 1;
+      const lean = W * .3 * Math.sin(k.phase - (f / NB) * 5.5 - 1.2) * k.swim;
+      const a = spine[j + 2] + (spine[j + 5] - spine[j + 2]) * fr;
+      const x = spine[j] + (spine[j + 3] - spine[j]) * fr - Math.sin(a) * lean;
+      const y = spine[j + 1] + (spine[j + 4] - spine[j + 1]) * fr + Math.cos(a) * lean;
+      setRow(i, x, y, a, .26, .26 * W, i / ND);
+    }
+    strip(ND + 1, 3, ki);
   }
 }
 
@@ -559,6 +660,7 @@ function quad(x, y, size, rot, uvs, type, seed, tx, ty) {
 
 function buildSurface() {
   sn = 0;
+  for (const s of pond.stones) quad(s.x, s.y, s.r * 1.15, 0, 1.15, STONE, s.seed, 0, 0);
   for (const p of pond.pads) quad(p.x, p.y, p.r * 1.12, p.rot, 1.12, PAD, p.seed, p.gx, p.gy);
   for (const f of pond.flowers) {
     const p = f.pad, a = p.rot + 2.4;
@@ -576,24 +678,26 @@ function upload(geo, data, count) {
 
 // ---------- frame ----------
 function render() {
-  const { water, cell } = pond, time = pond.time, res = [cssW, cssH];
+  const { water, cell } = pond, res = [cssW, cssH];
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, R.height);
   gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, water.w + 2, water.h + 2, gl.RED, gl.FLOAT, water.height);
   const hw = water.w + 2, hh = water.h + 2;
   const hmap = [1 / (cell * hw), 1 / (cell * hh), 1 / hw, 1 / hh], htexel = [1 / hw, 1 / hh];
+  const common = { u_res: res, u_time: pond.time, u_light: LIGHT };
 
-  // underwater scene
+  // underwater: the bed, fish shadows and fish, then the shadows of everything at the surface
   gl.disable(gl.BLEND);
-  draw(R.floor, R.scene, { u_res: res, u_time: time, u_hmap: hmap, u_htexel: htexel },
-    { u_height: R.height, u_floor: R.floorTex.tex });
+  draw(R.floor, R.scene, { ...common, u_hmap: hmap, u_htexel: htexel },
+    { u_height: R.height, u_floor: R.floorTex.tex, u_canopy: R.canopy.tex });
   gl.enable(gl.BLEND);
   buildKoi();
-  upload(R.koiGeo, kv, kn * 6);
+  upload(R.koiGeo, kv, kn * 8);
   const k = R.koi, depths = new Float32Array(8);
   pond.koi.forEach(f => { depths[f.variety] = f.depth; });
   gl.useProgram(k.p);
-  uniforms(k, { u_res: res, u_light: LIGHT, u_time: time, u_depth: depths });
+  uniforms(k, { ...common, u_depth: depths });
+  textures(k, { u_canopy: R.canopy.tex });
   for (const shadow of [1, 0]) {
     gl.uniform1f(k.u.u_shadow, shadow);
     gl.drawArrays(gl.TRIANGLES, 0, kn);
@@ -602,19 +706,21 @@ function render() {
   upload(R.surfGeo, sv, sn * 48);
   const s = R.surf;
   gl.useProgram(s.p);
-  uniforms(s, { u_res: res, u_light: LIGHT, u_shadow: 1 });
+  uniforms(s, { ...common, u_shadow: 1 });
+  textures(s, { u_canopy: R.canopy.tex });
   gl.drawArrays(gl.TRIANGLES, 0, sn * 6);
 
   // the surface itself
   gl.disable(gl.BLEND);
-  draw(R.water, null, { u_res: res, u_time: time, u_slope: 3.2, u_hmap: hmap, u_htexel: htexel },
-    { u_height: R.height, u_scene: R.scene.tex, u_canopy: R.canopy.tex });
+  draw(R.water, null, { ...common, u_slope: 3.2, u_hmap: hmap, u_htexel: htexel },
+    { u_height: R.height, u_scene: R.scene.tex, u_canopy: R.canopy.tex, u_floor: R.floorTex.tex });
 
-  // things floating on top
+  // things at the surface
   gl.enable(gl.BLEND);
   gl.useProgram(s.p);
   gl.bindVertexArray(R.surfGeo.vao);
   gl.uniform1f(s.u.u_shadow, 0);
+  textures(s, { u_canopy: R.canopy.tex });
   gl.drawArrays(gl.TRIANGLES, 0, sn * 6);
 }
 

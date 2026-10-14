@@ -35,7 +35,20 @@ test('koi stay in the pond through a minute of startles, food and a rotation', (
   for (const k of pond.koi) {
     for (const v of [k.x, k.y, k.dir, k.speed, k.depth]) assert.ok(Number.isFinite(v));
     assert.ok(k.x >= 0 && k.x <= pond.w && k.y >= 0 && k.y <= pond.h);
+    for (const r of pond.stones) assert.ok(Math.hypot(k.x - r.x, k.y - r.y) > r.r * 0.9, 'not inside a rock');
   }
   assert.ok(pond.water.height.every(Number.isFinite));
   assert.ok(pond.food.length < 9, 'koi ate');
+});
+
+test('a rock pins the surface and throws ripples back', () => {
+  const free = new Water(60, 60), rock = new Water(60, 60);
+  rock.block(40, 30, 5);
+  for (const w of [free, rock]) {
+    w.disturb(20.5, 30.5, 3, -1);
+    for (let i = 0; i < 90; i++) w.step();
+  }
+  assert.equal(rock.height[rock.idx(40, 30)], 0);
+  const echo = Math.abs(free.height[free.idx(28, 30)] - rock.height[rock.idx(28, 30)]);
+  assert.ok(echo > 1e-3, `reflection reaches back (${echo})`);
 });
