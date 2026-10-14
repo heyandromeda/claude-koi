@@ -1,0 +1,690 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Koi Pond">
+<meta name="theme-color" content="#0a3a3e">
+<meta name="description" content="An interactive koi pond with real water physics. Touch the water.">
+<title>Koi Pond</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #08343a; overflow: hidden; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+    font: 15px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+  .ui { position: fixed; right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom));
+    display: flex; gap: 10px; }
+  .ui button { width: 44px; height: 44px; padding: 0; border-radius: 50%; display: grid; place-items: center; cursor: pointer;
+    color: rgba(255, 255, 255, .9); background: rgba(6, 40, 44, .32); border: 1px solid rgba(255, 255, 255, .22);
+    -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); touch-action: manipulation; transition: transform .15s; }
+  .ui button:active { transform: scale(.92); }
+  .ui button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+  .ui svg { width: 18px; height: 18px; fill: currentColor; }
+  #hint { position: fixed; left: 0; right: 0; bottom: max(28px, calc(env(safe-area-inset-bottom) + 12px)); text-align: center;
+    color: rgba(255, 255, 255, .78); letter-spacing: .04em; pointer-events: none; transition: opacity 1.2s;
+    text-shadow: 0 1px 6px rgba(0, 0, 0, .4); }
+  #hint.gone { opacity: 0; }
+  #err { position: fixed; inset: 0; display: none; place-items: center; padding: 24px; text-align: center; color: #cfe; }
+</style>
+</head>
+<body>
+<canvas id="pond" aria-label="Koi pond. Touch or drag on the water to make ripples."></canvas>
+<div id="hint">Touch the water</div>
+<div class="ui">
+  <button id="feed" aria-label="Feed the koi">
+    <svg viewBox="0 0 24 24"><circle cx="7" cy="9" r="2.6"/><circle cx="15.5" cy="7" r="2.2"/><circle cx="12" cy="15" r="2.8"/><circle cx="18" cy="15.5" r="1.9"/></svg>
+  </button>
+  <button id="pause" aria-label="Pause" aria-pressed="false">
+    <svg viewBox="0 0 24 24"><path id="icon" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
+  </button>
+</div>
+<div id="err">This pond needs WebGL 2. Try the latest Safari or Chrome.</div>
+<script type="module">
+import { Pond, PAD, FLOWER, LEAF, FOOD } from './pond.js';
+
+const canvas = document.getElementById('pond');
+const hint = document.getElementById('hint');
+const MAX_RATIO = 2;          // beyond 2x the extra pixels cost battery and nobody can see them
+const LIGHT = [26, 34];       // px offset of shadows cast by objects at the surface
+
+// Koi varieties: base, patch, spots, fins, [patch threshold, spot threshold, metallic, tancho]
+const KOI = [
+  { c0: [.97, .95, .91], c1: [.92, .24, .06], c2: [0, 0, 0], fin: [.97, .96, .93], p: [.5, 9, .1, 0] },        // Kohaku
+  { c0: [.97, .95, .91], c1: [.9, .2, .05], c2: [.04, .04, .05], fin: [.95, .95, .93], p: [.5, .76, .1, 0] },   // Sanke
+  { c0: [.05, .05, .06], c1: [.92, .3, .07], c2: [.96, .94, .9], fin: [.25, .25, .27], p: [.56, .72, .15, 0] }, // Showa
+  { c0: [1, .79, .26], c1: [0, 0, 0], c2: [0, 0, 0], fin: [1, .85, .45], p: [9, 9, 1, 0] },                     // Yamabuki Ogon
+  { c0: [.97, .96, .93], c1: [.9, .12, .06], c2: [0, 0, 0], fin: [.97, .96, .94], p: [9, 9, .15, 1] },         // Tancho
+  { c0: [1, .5, .1], c1: [0, 0, 0], c2: [0, 0, 0], fin: [1, .62, .28], p: [9, 9, .8, 0] },                     // Orenji Ogon
+  { c0: [.05, .05, .06], c1: [.96, .95, .92], c2: [0, 0, 0], fin: [.75, .75, .75], p: [.53, 9, .1, 0] },       // Shiro Utsuri
+];
+
+// ---------- shaders ----------
+const HEAD = `#version 300 es
+precision highp float;
+precision highp int;
+`;
+const NOISE = `
+float hash(vec2 p) { vec3 q = fract(vec3(p.xyx) * .1031); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p), u = f * f * (3. - 2. * f);
+  return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+float fbm(vec2 p) { float s = 0., a = .5; for (int i = 0; i < 5; i++) { s += a * vnoise(p); p = p * 2.03 + 17.1; a *= .5; } return s; }
+`;
+const UNDERWATER = `
+uniform float u_time;
+const vec3 WATER = vec3(.02, .29, .31);
+vec3 absorb(vec3 c, float d) { vec3 T = exp(-vec3(1.6, .52, .42) * d); return c * T + WATER * (1. - T); }
+// Cheap animated caustic net (after Dave Hoskins' tileable water caustic).
+float caustic(vec2 p) {
+  float time = u_time * .5 + 23.;
+  vec2 q = p * .011 - 250., i = q;
+  float c = 1.;
+  for (int n = 0; n < 4; n++) {
+    float t = time * (1. - 3.5 / float(n + 1));
+    i = q + vec2(cos(t - i.x) + sin(t + i.y), sin(t - i.y) + cos(t + i.x));
+    c += 1. / length(vec2(q.x / (sin(i.x + t) / .005), q.y / (cos(i.y + t) / .005)));
+  }
+  c = 1.17 - pow(c / 4., 1.4);
+  return pow(abs(c), 8.);
+}
+`;
+const WATERFN = `
+uniform sampler2D u_height;
+uniform vec4 u_hmap;    // css px -> height texture uv
+uniform vec2 u_htexel;
+// (dh/dx, dh/dy, laplacian) in height units per grid cell
+vec3 waterD(vec2 p) {
+  vec2 uv = p * u_hmap.xy + u_hmap.zw;
+  float c = texture(u_height, uv).r;
+  float l = texture(u_height, uv - vec2(u_htexel.x, 0)).r, r = texture(u_height, uv + vec2(u_htexel.x, 0)).r;
+  float t = texture(u_height, uv - vec2(0, u_htexel.y)).r, b = texture(u_height, uv + vec2(0, u_htexel.y)).r;
+  return vec3((r - l) * .5, (b - t) * .5, l + r + t + b - 4. * c);
+}
+`;
+const SV = `vec2 sv(vec2 p) { return vec2(p.x / u_res.x, 1. - p.y / u_res.y); }`;
+
+const VS_FULL = `${HEAD}
+uniform vec2 u_res;
+out vec2 v_p;
+void main() {
+  vec2 c = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+  gl_Position = vec4(c * 2. - 1., 0., 1.);
+  v_p = vec2(c.x, 1. - c.y) * u_res;
+}`;
+
+// One-off: pebbles, sand, moss and rocks. rgb = albedo, a = water depth.
+const FS_FLOORGEN = `${HEAD}${NOISE}
+uniform vec2 u_res;
+in vec2 v_p; out vec4 o;
+// F1, F2, cell id; c = nearest feature point
+vec3 voro(vec2 x, out vec2 c) {
+  vec2 n = floor(x), f = fract(x);
+  float f1 = 8., f2 = 8., id = 0.;
+  for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
+    vec2 g = vec2(i, j), r = g + vec2(hash(n + g), hash(n + g + 19.7)) * .85 - f;
+    float d = dot(r, r);
+    if (d < f1) { f2 = f1; f1 = d; id = hash(n + g + 3.1); c = x + r; } else if (d < f2) f2 = d;
+  }
+  return vec3(sqrt(f1), sqrt(f2), id);
+}
+vec2 warp(vec2 q) { return q + .3 * vec2(vnoise(q * .7), vnoise(q * .7 + 5.)); }
+// Boulders hugging the pond wall: x = coverage, y = lighting, z = height
+vec3 boulder(vec2 p, float m) {
+  vec2 c;
+  float sc = m * .26;
+  vec3 v = voro(p / sc + 2.7, c);
+  vec2 cp = (c - 2.7) * sc;
+  float wall = min(min(cp.x, u_res.x - cp.x), min(cp.y, u_res.y - cp.y));
+  float r0 = .42 + .07 * vnoise(p / 14.);
+  float on = step(.3, v.z) * step(wall, m * .1);
+  vec2 off = (p / sc + 2.7 - c) / r0;
+  float rr = length(off);
+  vec3 n = vec3(off, sqrt(max(0., 1. - rr * rr)) * 1.2);
+  float lit = clamp(dot(normalize(n), normalize(vec3(-.5, -.6, .7))), 0., 1.);
+  return vec3(on * smoothstep(1.03, .97, rr), .35 + .9 * lit, 1. - rr);
+}
+void main() {
+  vec2 p = v_p, c;
+  float m = min(u_res.x, u_res.y);
+  vec2 q = p / 10.;
+  vec3 v = voro(warp(q), c);
+  float e = v.y - v.x;
+  float shade = clamp(1. + 2.5 * (voro(warp(q - vec2(.06, .08)), c).x - v.x), .6, 1.3); // domes lit from top-left
+  vec3 peb = mix(mix(vec3(.32, .3, .27), vec3(.24, .24, .25), step(.5, v.z)),
+                 mix(vec3(.4, .36, .3), vec3(.17, .16, .15), step(.5, fract(v.z * 7.))), step(.6, fract(v.z * 3.1)));
+  peb *= (.85 + .3 * fract(v.z * 13.)) * shade * (1. - .35 * v.x);
+  vec3 col = mix(vec3(.14, .12, .1), mix(peb, vec3(.29, .27, .24), .3), smoothstep(.02, .12, e));
+  float silt = smoothstep(.4, .62, fbm(p / 130.));
+  col = mix(col, vec3(.34, .31, .23) * (.85 + .3 * vnoise(p / 3.)), silt * .8);
+  float moss = smoothstep(.52, .7, fbm(p / 95. + 9.));
+  col = mix(col, vec3(.16, .25, .09) * (.7 + .5 * vnoise(p / 4.)), moss * .7);
+  vec3 bd = boulder(p, m);
+  col *= 1. - .45 * boulder(p - vec2(9, 12), m).x * (1. - bd.x);             // boulders shade the floor
+  vec3 rock = vec3(.43, .42, .39) * (.7 + .45 * fbm(p / 6.)) * bd.y;
+  rock = mix(rock, vec3(.2, .3, .1) * bd.y, smoothstep(.55, .7, fbm(p / 16. + 2.)) * .8);
+  col = mix(col, rock, bd.x);
+  float edge = min(min(p.x, u_res.x - p.x), min(p.y, u_res.y - p.y));
+  float depth = .58 + .42 * smoothstep(0., m * .4, edge) + .12 * (fbm(p / 220.) - .5);
+  o = vec4(col, clamp(depth - bd.x * (.25 + .25 * bd.z) - silt * .06, .12, 1.));
+}`;
+
+// One-off: overhanging maples and sky, seen in reflections.
+const FS_CANOPY = `${HEAD}${NOISE}
+uniform vec2 u_res;
+in vec2 v_p; out vec4 o;
+void main() {
+  vec2 uv = v_p / u_res;
+  float r = length(uv - .5) * 2.;
+  float leaves = fbm(uv * 7.) + .45 * vnoise(uv * 55.) - .2;
+  float cover = smoothstep(.47, .55, leaves + (r - .6) * .8);
+  vec3 sky = mix(vec3(.95, .98, 1.), vec3(.6, .78, .9), clamp(r * .7, 0., 1.));
+  vec3 maple = mix(vec3(.6, .1, .05), vec3(.88, .45, .1), vnoise(uv * 18.));
+  vec3 leaf = mix(vec3(.1, .22, .1), maple, smoothstep(.42, .6, fbm(uv * 3. + 4.)));
+  leaf *= .5 + .6 * vnoise(uv * 90.);
+  o = vec4(mix(sky, leaf, cover), 1.);
+}`;
+
+// Per frame, underwater: floor lit by caustics that the real ripples focus and bend.
+const FS_FLOOR = `${HEAD}${UNDERWATER}${WATERFN}
+uniform vec2 u_res;
+uniform sampler2D u_floor;
+in vec2 v_p; out vec4 o;
+${SV}
+void main() {
+  vec4 f = texture(u_floor, sv(v_p));
+  vec3 d = waterD(v_p);
+  float c = caustic(v_p + d.xy * 140.);
+  float focus = clamp(1. - d.z * 14., .2, 3.5);   // crests focus sunlight, troughs spread it
+  vec3 light = vec3(.5) + vec3(1., .97, .88) * focus * (.32 + c * 1.25 * (1.2 - f.a * .5));
+  o = vec4(absorb(f.rgb * light, f.a), 1.);
+}`;
+
+const VS_KOI = `${HEAD}
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+layout(location = 2) in vec2 a_info;
+uniform vec2 u_res, u_light;
+uniform float u_shadow, u_depth[8];
+out vec2 v_uv, v_p;
+flat out int v_k, v_part;
+void main() {
+  v_part = int(a_info.x + .5); v_k = int(a_info.y + .5);
+  vec2 p = a_pos + u_shadow * u_light * (1.1 - u_depth[v_k]);
+  v_uv = a_uv; v_p = p;
+  gl_Position = vec4((p / u_res * 2. - 1.) * vec2(1, -1), 0., 1.);
+}`;
+
+const FS_KOI = `${HEAD}${NOISE}${UNDERWATER}
+uniform vec3 u_c0[8], u_c1[8], u_c2[8], u_fin[8];
+uniform vec4 u_kp[8];
+uniform float u_shadow, u_depth[8];
+in vec2 v_uv, v_p;
+flat in int v_k, v_part;
+out vec4 o;
+float bodyW(float t) { return t < .3 ? sqrt(max(0., 1. - pow((.3 - t) / .3, 2.))) : 1. - .82 * pow((t - .3) / .7, 1.2); }
+float fbm3(vec2 p) { return .5 * vnoise(p) + .3 * vnoise(p * 2.1 + 7.) + .2 * vnoise(p * 4.3 + 3.); }
+void main() {
+  float t = v_uv.x, s = v_uv.y;
+  float half_ = v_part == 0 ? bodyW(t) : v_part == 1 ? .1 + .8 * t : .3 + .7 * t;
+  float d = abs(s) - half_;
+  float extra = v_part == 1 ? t - (.7 + .3 * abs(s) / max(half_, .01))   // forked tail
+              : v_part == 2 ? length(vec2(t, s * .6)) - 1. : -1.;          // rounded fin tip
+  if (u_shadow > .5) {
+    float a = smoothstep(.3, -.3, d) * smoothstep(.15, -.15, extra) * (v_part == 0 ? .34 : .14);
+    o = vec4(0, 0, 0, a);
+    return;
+  }
+  float alpha = clamp(.5 - d / (fwidth(s) + 1e-4), 0., 1.) * clamp(.5 - extra / (fwidth(t) + 1e-4), 0., 1.);
+  if (alpha <= 0.) discard;
+  int k = v_k;
+  vec4 kp = u_kp[k];
+  vec3 col;
+  if (v_part == 0) {
+    vec2 pc = vec2(t * 3.2, s * .9) + float(k) * 13.7;
+    col = mix(u_c0[k], u_c1[k], smoothstep(kp.x - .025, kp.x + .025, fbm3(pc)));
+    col = mix(col, u_c2[k], smoothstep(kp.y - .03, kp.y + .03, vnoise(pc * 2.6 + 31.)));
+    if (kp.w > .5) col = mix(u_c0[k], u_c1[k], smoothstep(.5, .45, length(vec2((t - .15) * 4., s))));
+    col = mix(u_c0[k], col, smoothstep(.02, .07, t));       // clean snout
+    float sn = clamp(s / max(half_, .05), -1., 1.), cyl = sqrt(1. - sn * sn);
+    float scales = .5 + .5 * sin(t * 95. + floor(s * 7.) * 1.6) * sin(s * 21.);
+    float ridge = smoothstep(.09, 0., abs(s)) * smoothstep(.28, .35, t) * smoothstep(.68, .6, t);
+    col *= (.48 + .58 * cyl) * (1. - .07 * scales) * (1. - .22 * ridge);
+    col += vec3(1, .95, .85) * pow(cyl, 12.) * (.1 + .55 * kp.z) * (1. + scales * kp.z);
+    float eye = length(vec2((t - .085) * 4.6, abs(s) - .48));
+    col = mix(col, vec3(.03), smoothstep(.1, .07, eye));
+  } else {
+    float ray = .82 + .18 * sin(atan(s, t + .2) * 30.);
+    col = u_fin[k] * ray;
+    alpha *= (v_part == 1 ? .82 : .72) * mix(1., .5, smoothstep(.4, 1., t));
+  }
+  float dep = u_depth[k];
+  col *= .78 + caustic(v_p) * .9 * (1.1 - dep);
+  o = vec4(absorb(col, dep * .55) * alpha, alpha);
+}`;
+
+// Per frame, to screen: refraction, reflection, sun glints.
+const FS_WATER = `${HEAD}${WATERFN}
+uniform vec2 u_res;
+uniform float u_time, u_slope;
+uniform sampler2D u_scene, u_canopy;
+in vec2 v_p; out vec4 o;
+${SV}
+void main() {
+  vec2 p = v_p;
+  vec3 d = waterD(p);
+  vec2 g = d.xy * u_slope;
+  // wind: a few faint travelling wavelets keep the surface alive
+  vec2 k1 = vec2(.05, .021), k2 = vec2(-.023, .061), k3 = vec2(.071, -.043);
+  float t = u_time;
+  g += k1 * cos(dot(k1, p) - t * 1.9) * .2 + k2 * cos(dot(k2, p) - t * 2.3) * .16 + k3 * cos(dot(k3, p) - t * 2.9) * .09;
+  vec3 n = normalize(vec3(-g, 1.));
+  vec2 off = -n.xy * 30.;
+  vec3 under = vec3(texture(u_scene, sv(p + off)).r, texture(u_scene, sv(p + off * 1.03)).g, texture(u_scene, sv(p + off * 1.06)).b);
+  vec3 V = normalize(vec3((p - u_res * .5) / max(u_res.x, u_res.y) * .8, -1.));
+  vec3 R = reflect(V, n);
+  vec3 env = texture(u_canopy, R.xy / R.z * .75 + .5).rgb;
+  float F = .02 + .98 * pow(1. - max(dot(-V, n), 0.), 5.);
+  vec3 col = mix(under, env, clamp(F * 2.5 + .07, 0., 1.));
+  vec3 L = normalize(vec3(-.4, -.55, 1.));
+  float sp = max(dot(R, L), 0.), sun = smoothstep(.55, .85, dot(env, vec3(.33)));
+  col += vec3(1., .96, .88) * (pow(sp, 900.) * 3.5 + pow(sp, 80.) * .12) * sun;
+  float edge = min(min(p.x, u_res.x - p.x), min(p.y, u_res.y - p.y));
+  col *= .8 + .2 * smoothstep(0., 80., edge);
+  o = vec4(col, 1.);
+}`;
+
+const VS_SURF = `${HEAD}
+layout(location = 0) in vec2 a_pos;
+layout(location = 1) in vec2 a_uv;
+layout(location = 2) in vec4 a_info;
+uniform vec2 u_res, u_light;
+uniform float u_shadow;
+out vec2 v_uv;
+flat out vec4 v_info;
+void main() {
+  vec2 p = a_pos + u_shadow * u_light * 1.25;
+  v_uv = a_uv; v_info = a_info;
+  gl_Position = vec4((p / u_res * 2. - 1.) * vec2(1, -1), 0., 1.);
+}`;
+
+const FS_SURF = `${HEAD}${NOISE}
+uniform float u_shadow;
+in vec2 v_uv;
+flat in vec4 v_info;
+out vec4 o;
+void main() {
+  vec2 uv = v_uv;
+  float r = length(uv), a = atan(uv.y, uv.x), aa = fwidth(r) + 1e-4;
+  int type = int(v_info.x + .5);
+  float seed = v_info.y;
+  vec2 tilt = v_info.zw;
+  float lit = 1. + dot(tilt, vec2(-.5, -.7)) * 4.;
+  float shape, alpha;
+  vec3 col;
+  if (type == 0) {                                   // lily pad
+    shape = .93 + .02 * sin(a * 9. + seed * 40.) - r;
+    float notch = r * (.2 - abs(a)) * step(.05, r);
+    alpha = clamp(shape / aa + .5, 0., 1.) * clamp(.5 - notch / aa, 0., 1.);
+    if (u_shadow > .5) { o = vec4(0, 0, 0, smoothstep(-.25, .2, shape) * .4); return; }
+    col = mix(vec3(.15, .34, .12), vec3(.3, .5, .17), smoothstep(.9, .1, r));
+    float vein = abs(fract(a * 2.07 + .5) - .5) / 2.07 * r;
+    col *= 1. + .16 * smoothstep(.022, .0, vein) * smoothstep(.12, .3, r);
+    col = mix(col, vec3(.45, .38, .14), smoothstep(.74, .86, vnoise(uv * 3. + seed * 50.)) * .55);
+    col = mix(col, vec3(.48, .58, .22), smoothstep(-.12, -.02, -shape) * .45);   // curled rim
+    col *= lit * (.92 + .16 * dot(uv, vec2(-.5, -.7)));
+    col += .1 * pow(max(0., 1. - length(uv - vec2(-.35, -.45)) * 1.3), 3.);        // waxy sheen
+    float ring = smoothstep(.1, 0., -shape) * (1. - alpha) * .3;                    // wet meniscus
+    o = vec4(col * alpha, alpha + ring * (1. - alpha));
+    return;
+  }
+  if (u_shadow > .5 && type != 1) { o = vec4(0); return; }
+  if (type == 1) {                                   // lotus
+    float p1 = .58 + .4 * pow(abs(cos(a * 4.)), .6), p2 = .32 + .32 * pow(abs(cos(a * 4. + 1.5708)), .6);
+    float outer = clamp((p1 - r) / aa + .5, 0., 1.), inner = clamp((p2 - r) / aa + .5, 0., 1.);
+    alpha = max(outer, inner);
+    if (u_shadow > .5) { o = vec4(0, 0, 0, smoothstep(.3, -.1, r - p1) * .3); return; }
+    vec3 pink = vec3(.97, .55, .7), white = vec3(1, .95, .96);
+    col = mix(white, pink, smoothstep(.25, 1., r / p1)) * (.82 + .18 * abs(cos(a * 4.)));
+    col = mix(col, mix(vec3(1, .97, .97), pink, smoothstep(.1, 1., r / p2) * .7) * (.85 + .15 * abs(sin(a * 4.))), inner);
+    col = mix(col, vec3(1, .78, .2) * (.85 + .3 * vnoise(uv * 30.)), smoothstep(.15, .12, r));
+    col *= lit;
+  } else if (type == 2) {                            // maple leaf
+    float b = a + 1.5708;
+    float rr = .5 + .45 * pow(abs(cos(b * 2.5)), .9) + .02 * sin(b * 40.);
+    float stem = step(0., uv.y) * step(uv.y, .95) * smoothstep(.05, .02, abs(uv.x));
+    alpha = max(clamp((rr - r) / aa + .5, 0., 1.), stem);
+    col = mix(mix(vec3(.75, .1, .04), vec3(.92, .42, .08), seed), vec3(.88, .62, .12), step(.75, seed));
+    col *= (.8 + .3 * smoothstep(.1, 0., abs(sin(b * 2.5)) * r)) * lit * (.9 + .2 * vnoise(uv * 8. + seed * 9.));
+    col = mix(col, col * .6, stem);
+  } else {                                           // food pellet
+    alpha = clamp((.8 - r) / aa + .5, 0., 1.);
+    col = vec3(.52, .33, .15) * (.75 + .5 * smoothstep(.6, 0., length(uv - vec2(-.3, -.3))));
+  }
+  o = vec4(col * alpha, alpha);
+}`;
+
+// ---------- GL plumbing ----------
+let gl, R;
+
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS) && !gl.isContextLost()) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p, s);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS) && !gl.isContextLost()) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  for (let i = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS); i--;) {
+    const name = gl.getActiveUniform(p, i).name.replace('[0]', '');
+    u[name] = gl.getUniformLocation(p, name);
+  }
+  return { p, u };
+}
+
+function texture(w, h, internal, format, type, filter = gl.LINEAR, wrap = gl.CLAMP_TO_EDGE) {
+  const t = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, format, type, null);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, wrap);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, wrap);
+  return t;
+}
+
+function target(w, h) {
+  const tex = texture(w, h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  return { tex, fb, w, h };
+}
+
+function geometry(stride, sizes) {
+  const vao = gl.createVertexArray(), buf = gl.createBuffer();
+  gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  let off = 0;
+  sizes.forEach((n, i) => {
+    gl.enableVertexAttribArray(i);
+    gl.vertexAttribPointer(i, n, gl.FLOAT, false, stride * 4, off * 4);
+    off += n;
+  });
+  return { vao, buf };
+}
+
+function initGL() {
+  R = {
+    floorGen: program(VS_FULL, FS_FLOORGEN), canopyGen: program(VS_FULL, FS_CANOPY),
+    floor: program(VS_FULL, FS_FLOOR), koi: program(VS_KOI, FS_KOI),
+    water: program(VS_FULL, FS_WATER), surf: program(VS_SURF, FS_SURF),
+    empty: gl.createVertexArray(), koiGeo: geometry(6, [2, 2, 2]), surfGeo: geometry(8, [2, 2, 4]),
+  };
+  R.canopy = target(512, 512);
+  draw(R.canopyGen, R.canopy, { u_res: [512, 512] });
+  const k = R.koi;
+  gl.useProgram(k.p);
+  const flat = key => KOI.flatMap(v => v[key]).concat(new Array((8 - KOI.length) * KOI[0][key].length).fill(0));
+  gl.uniform3fv(k.u.u_c0, flat('c0')); gl.uniform3fv(k.u.u_c1, flat('c1'));
+  gl.uniform3fv(k.u.u_c2, flat('c2')); gl.uniform3fv(k.u.u_fin, flat('fin'));
+  gl.uniform4fv(k.u.u_kp, flat('p'));
+  gl.disable(gl.DEPTH_TEST);
+  gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); // everything outputs premultiplied alpha
+}
+
+function uniforms(prog, values) {
+  for (const name in values) {
+    const loc = prog.u[name], v = values[name];
+    if (loc === undefined) continue;
+    if (typeof v === 'number') gl.uniform1f(loc, v);
+    else if (v.length === 2) gl.uniform2fv(loc, v);
+    else if (v.length === 4) gl.uniform4fv(loc, v);
+    else gl.uniform1fv(loc, v);
+  }
+}
+
+// Fullscreen pass; textures bound to units in the order given.
+function draw(prog, tgt, values, textures = {}) {
+  gl.bindFramebuffer(gl.FRAMEBUFFER, tgt ? tgt.fb : null);
+  gl.viewport(0, 0, tgt ? tgt.w : canvas.width, tgt ? tgt.h : canvas.height);
+  gl.useProgram(prog.p);
+  uniforms(prog, values);
+  Object.entries(textures).forEach(([name, tex], i) => {
+    gl.activeTexture(gl.TEXTURE0 + i);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(prog.u[name], i);
+  });
+  gl.bindVertexArray(R.empty);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ---------- sizing ----------
+let pond, cssW = 0, cssH = 0, quality = 1;
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (!w || !h) return;
+  const ratio = Math.min(devicePixelRatio || 1, MAX_RATIO) * quality;
+  const bw = Math.round(w * ratio), bh = Math.round(h * ratio);
+  if (w !== cssW || h !== cssH) {
+    cssW = w; cssH = h;
+    if (pond) pond.resize(w, h); else pond = new Pond(w, h, (Math.random() * 1e9) | 0);
+    if (R.height) gl.deleteTexture(R.height);
+    R.height = null;
+  }
+  if (!R.height) {
+    const { water } = pond;
+    R.height = texture(water.w + 2, water.h + 2, gl.R16F, gl.RED, gl.FLOAT);
+  }
+  if (canvas.width !== bw || canvas.height !== bh || !R.scene) {
+    canvas.width = bw; canvas.height = bh;
+    for (const t of [R.scene, R.floorTex]) if (t) { gl.deleteTexture(t.tex); gl.deleteFramebuffer(t.fb); }
+    R.scene = target(bw, bh);
+    R.floorTex = target(bw, bh);
+    draw(R.floorGen, R.floorTex, { u_res: [cssW, cssH] });
+  }
+}
+
+// ---------- geometry built each frame ----------
+const NB = 20, NT = 5, FINS = [[.2, .2, .085, 1, .35], [.56, .12, .05, .7, .12]]; // t, length, width, spread, flap
+const spine = new Float32Array((NB + NT + 1) * 3), row = new Float32Array((NB + 1) * 8);
+const kv = new Float32Array(8 * 200 * 6), sv = new Float32Array(128 * 6 * 8);
+let kn = 0, sn = 0;
+const bodyW = t => t < .3 ? Math.sqrt(Math.max(0, 1 - ((.3 - t) / .3) ** 2)) : 1 - .82 * ((t - .3) / .7) ** 1.2;
+
+function setRow(i, x, y, a, half, px, u) {
+  const nx = -Math.sin(a) * px, ny = Math.cos(a) * px, o = i * 8;
+  row[o] = x + nx; row[o + 1] = y + ny; row[o + 2] = u; row[o + 3] = half;
+  row[o + 4] = x - nx; row[o + 5] = y - ny; row[o + 6] = u; row[o + 7] = -half;
+}
+function put(o, part, k) {
+  const d = kn++ * 6;
+  kv[d] = row[o]; kv[d + 1] = row[o + 1]; kv[d + 2] = row[o + 2]; kv[d + 3] = row[o + 3]; kv[d + 4] = part; kv[d + 5] = k;
+}
+function strip(rows, part, k) {
+  for (let i = 0; i < rows - 1; i++) {
+    const a = i * 8, b = a + 8;
+    put(a, part, k); put(a + 4, part, k); put(b, part, k);
+    put(a + 4, part, k); put(b + 4, part, k); put(b, part, k);
+  }
+}
+
+function buildKoi() {
+  kn = 0;
+  for (const k of pond.koi.slice().sort((a, b) => b.depth - a.depth)) {
+    const L = k.len, W = L * .11, ki = k.variety;
+    k.spine(NB, NT, spine);
+    for (const [t, fl, fw, spread, flap] of FINS) {
+      const j = Math.round(t * NB) * 3, a = spine[j + 2];
+      for (const side of [-1, 1]) {
+        const off = bodyW(t) * W * .75 * side;
+        const x = spine[j] - Math.sin(a) * off, y = spine[j + 1] + Math.cos(a) * off;
+        const fa = a + side * (spread + flap * Math.sin(k.fin + side * .8));
+        setRow(0, x, y, fa, 1, fw * L, 0);
+        setRow(1, x + Math.cos(fa) * fl * L, y + Math.sin(fa) * fl * L, fa, 1, fw * L, 1);
+        strip(2, 2, ki);
+      }
+    }
+    for (let i = 0; i <= NT; i++) {
+      const j = (NB + i) * 3, u = i / NT, half = .1 + .8 * u + .12;
+      setRow(i, spine[j], spine[j + 1], spine[j + 2], half, half * W, u);
+    }
+    strip(NT + 1, 1, ki);
+    for (let i = 0; i <= NB; i++) {
+      const j = i * 3, t = i / NB, half = Math.max(bodyW(t), bodyW(Math.min(1, t + 1 / NB))) + .12;
+      setRow(i, spine[j], spine[j + 1], spine[j + 2], half, half * W, t);
+    }
+    strip(NB + 1, 0, ki);
+  }
+}
+
+function quad(x, y, size, rot, uvs, type, seed, tx, ty) {
+  if (sn >= 128) return;
+  const c = Math.cos(rot) * size, s = Math.sin(rot) * size;
+  let o = sn++ * 48;
+  for (const [u, v] of [[-1, -1], [1, -1], [1, 1], [-1, -1], [1, 1], [-1, 1]]) {
+    sv[o] = x + u * c - v * s; sv[o + 1] = y + u * s + v * c; sv[o + 2] = u * uvs; sv[o + 3] = v * uvs;
+    sv[o + 4] = type; sv[o + 5] = seed; sv[o + 6] = tx; sv[o + 7] = ty;
+    o += 8;
+  }
+}
+
+function buildSurface() {
+  sn = 0;
+  for (const p of pond.pads) quad(p.x, p.y, p.r * 1.12, p.rot, 1.12, PAD, p.seed, p.gx, p.gy);
+  for (const f of pond.flowers) {
+    const p = f.pad, a = p.rot + 2.4;
+    quad(p.x + Math.cos(a) * p.r * .3, p.y + Math.sin(a) * p.r * .3, p.r * .55, f.seed * 6, 1, FLOWER, f.seed, p.gx, p.gy);
+  }
+  for (const l of pond.leaves) quad(l.x, l.y, l.r, l.rot, 1, LEAF, l.seed, l.gx, l.gy);
+  for (const f of pond.food) quad(f.x, f.y, f.r, 0, 1, FOOD, f.seed, f.gx, f.gy);
+}
+
+function upload(geo, data, count) {
+  gl.bindVertexArray(geo.vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, geo.buf);
+  gl.bufferData(gl.ARRAY_BUFFER, data.subarray(0, count), gl.DYNAMIC_DRAW);
+}
+
+// ---------- frame ----------
+function render() {
+  const { water, cell } = pond, time = pond.time, res = [cssW, cssH];
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, R.height);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, water.w + 2, water.h + 2, gl.RED, gl.FLOAT, water.height);
+  const hw = water.w + 2, hh = water.h + 2;
+  const hmap = [1 / (cell * hw), 1 / (cell * hh), 1 / hw, 1 / hh], htexel = [1 / hw, 1 / hh];
+
+  // underwater scene
+  gl.disable(gl.BLEND);
+  draw(R.floor, R.scene, { u_res: res, u_time: time, u_hmap: hmap, u_htexel: htexel },
+    { u_height: R.height, u_floor: R.floorTex.tex });
+  gl.enable(gl.BLEND);
+  buildKoi();
+  upload(R.koiGeo, kv, kn * 6);
+  const k = R.koi, depths = new Float32Array(8);
+  pond.koi.forEach(f => { depths[f.variety] = f.depth; });
+  gl.useProgram(k.p);
+  uniforms(k, { u_res: res, u_light: LIGHT, u_time: time, u_depth: depths });
+  for (const shadow of [1, 0]) {
+    gl.uniform1f(k.u.u_shadow, shadow);
+    gl.drawArrays(gl.TRIANGLES, 0, kn);
+  }
+  buildSurface();
+  upload(R.surfGeo, sv, sn * 48);
+  const s = R.surf;
+  gl.useProgram(s.p);
+  uniforms(s, { u_res: res, u_light: LIGHT, u_shadow: 1 });
+  gl.drawArrays(gl.TRIANGLES, 0, sn * 6);
+
+  // the surface itself
+  gl.disable(gl.BLEND);
+  draw(R.water, null, { u_res: res, u_time: time, u_slope: 3.2, u_hmap: hmap, u_htexel: htexel },
+    { u_height: R.height, u_scene: R.scene.tex, u_canopy: R.canopy.tex });
+
+  // things floating on top
+  gl.enable(gl.BLEND);
+  gl.useProgram(s.p);
+  gl.bindVertexArray(R.surfGeo.vao);
+  gl.uniform1f(s.u.u_shadow, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, sn * 6);
+}
+
+const pointers = new Map();
+let raf = 0, last = 0, paused = false, ema = 16.7, slowFor = 0;
+
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const dt = Math.min(.05, Math.max(0, (now - last) / 1000)); last = now;
+  // adaptive resolution: if frames stay slow, render fewer pixels (never below 1 per CSS px)
+  ema += (dt * 1000 - ema) * .05;
+  const maxRatio = Math.min(devicePixelRatio || 1, MAX_RATIO);
+  if (ema > 26 && maxRatio * quality > 1.01) {
+    if ((slowFor += dt) > 2) { quality = Math.max(1 / maxRatio, quality * .8); slowFor = 0; ema = 16.7; resize(); }
+  } else slowFor = 0;
+  for (const p of pointers.values()) pond.hold(p.x, p.y, dt);
+  pond.update(dt);
+  render();
+}
+
+function start() { if (!raf && !paused && gl && !gl.isContextLost()) { last = performance.now(); raf = requestAnimationFrame(frame); } }
+function stop() { cancelAnimationFrame(raf); raf = 0; }
+
+// ---------- input ----------
+const pos = e => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+let hinted = false;
+function dismissHint() { if (!hinted) { hinted = true; hint.classList.add('gone'); } }
+
+canvas.addEventListener('pointerdown', e => {
+  if (paused) return;
+  canvas.setPointerCapture(e.pointerId);
+  const [x, y] = pos(e);
+  pointers.set(e.pointerId, { x, y });
+  pond.touch(x, y);
+  dismissHint();
+});
+canvas.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  const [x, y] = pos(e);
+  pond.drag(p.x, p.y, x, y);
+  p.x = x; p.y = y;
+});
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) canvas.addEventListener(type, e => pointers.delete(e.pointerId));
+for (const type of ['gesturestart', 'contextmenu', 'dblclick']) document.addEventListener(type, e => e.preventDefault());
+
+const pauseBtn = document.getElementById('pause'), icon = document.getElementById('icon');
+pauseBtn.addEventListener('click', () => {
+  paused = !paused;
+  pauseBtn.setAttribute('aria-pressed', paused);
+  pauseBtn.setAttribute('aria-label', paused ? 'Resume' : 'Pause');
+  icon.setAttribute('d', paused ? 'M8 5l11 7-11 7z' : 'M7 5h3.5v14H7zM13.5 5H17v14h-3.5z');
+  pointers.clear();
+  paused ? stop() : start();
+});
+document.getElementById('feed').addEventListener('click', () => { pond.feed(); dismissHint(); if (paused) pauseBtn.click(); });
+document.addEventListener('visibilitychange', () => (document.hidden ? stop() : start()));
+new ResizeObserver(() => { if (gl && !gl.isContextLost()) { resize(); if (!raf) render(); } }).observe(canvas);
+canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); stop(); });
+canvas.addEventListener('webglcontextrestored', () => { initGL(); resize(); start(); });
+setTimeout(dismissHint, 7000);
+
+gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, powerPreference: 'high-performance' });
+if (!gl) {
+  document.getElementById('err').style.display = 'grid';
+} else {
+  initGL();
+  resize();
+  start();
+}
+</script>
+</body>
+</html>
