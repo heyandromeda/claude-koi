@@ -30,7 +30,7 @@ vec4 stones(vec2 p, float sc, float dens, float seed) {
     r.w = min(r.w, mix(.7, 1., smoothstep(.85, 1.25, length(o2) / rad)));
     if (e < 1. && z > top) {
       top = z;
-      r.xyz = vec3(smoothstep(1., .86, e), .75 + .3 * max(dot(normalize(vec3(o2 / rad, z * 1.4)), LD), 0.), hash(g + seed + 2.9));
+      r.xyz = vec3(smoothstep(1., .86, e) * .7, .85 + .2 * max(dot(normalize(vec3(o2 / rad, z * 1.4)), LD), 0.), hash(g + seed + 2.9));
     }
   }
   return r;
@@ -59,8 +59,8 @@ void main() {
   // rock bases
   float top = 0.;
   vec3 nrm = vec3(0, 0, 1);
-  for (int i = 0; i < 4; i++) if (u_rocks[i].z > 0.) dome((p - u_rocks[i].xy) / (u_rocks[i].z * 1.4), top, nrm);
-  vec3 rock = vec3(.4, .39, .35) * (.75 + .4 * fbm(p / 7.)) * (.45 + .7 * max(dot(nrm, LD), 0.));
+  for (int i = 0; i < 4; i++) if (u_rocks[i].z > 0.) dome((p - u_rocks[i].xy) / (u_rocks[i].z * 1.12), top, nrm);
+  vec3 rock = vec3(.26, .26, .2) * (.75 + .4 * fbm(p / 7.)) * (.45 + .7 * max(dot(nrm, LD), 0.));
   col = mix(col, rock, smoothstep(0., .1, top));
   o = vec4(col, clamp(depth - top * (depth - .05), .03, 1.6) / 1.6);
 }`;
@@ -73,7 +73,7 @@ void main() {
   float r = length(uv - .5) * 2.;
   // maple boughs reach in from the top-left (the bank side); open sky elsewhere
   float reach = smoothstep(1.1, .2, length(uv - vec2(.05, .05)));
-  float cover = smoothstep(.5, .58, fbm(uv * 7.) + .45 * vnoise(uv * 55.) - .25 + reach * .45 + (r - .7) * .3);
+  float cover = smoothstep(.5, .58, fbm(uv * 7.) + .45 * vnoise(uv * 55.) - .55 + reach * .85);   // open sky except under the maple
   vec3 sky = mix(vec3(.93, .96, 1.), vec3(.62, .76, .92), clamp(r * .7, 0., 1.));
   vec3 maple = mix(vec3(.55, .1, .05), vec3(.85, .42, .1), vnoise(uv * 18.));
   vec3 leaf = mix(vec3(.12, .2, .09), maple, smoothstep(.4, .6, fbm(uv * 3. + 4.))) * (.5 + .6 * vnoise(uv * 90.));

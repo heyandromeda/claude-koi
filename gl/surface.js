@@ -55,7 +55,7 @@ void main() {
     float shape = .93 + .03 * (vnoise(vec2(a * 3., seed * 9.)) - .5) - r;
     alpha = clamp(shape / aa + .5, 0., 1.) * clamp(.5 - notch / aa, 0., 1.);
     if (u_shadow > .5) { o = vec4(0, 0, 0, alpha * .75); return; }
-    col = mix(vec3(.24, .36, .14), vec3(.5, .46, .18), smoothstep(.3, .9, seed + .3 * vnoise(uv * 2. + seed * 9.)));
+    col = mix(vec3(.1, .2, .06), vec3(.34, .3, .1), smoothstep(.62, .95, seed + .25 * vnoise(uv * 2. + seed * 9.)));
     col *= .9 + .12 * smoothstep(.9, .2, r);
     float vein = abs(fract(a * 2.4 + .5) - .5) / 2.4 * r;
     col *= 1. + .06 * smoothstep(.015, .0, vein) * smoothstep(.15, .4, r);
@@ -68,7 +68,7 @@ void main() {
     float stem = step(0., uv.y) * step(uv.y, .9) * smoothstep(.04, .015, abs(uv.x));
     alpha = max(clamp((rr - r) / aa + .5, 0., 1.), stem);
     if (u_shadow > .5) { o = vec4(0, 0, 0, alpha * .6); return; }
-    col = mix(mix(vec3(.62, .08, .04), vec3(.8, .32, .06), seed), vec3(.45, .25, .1), step(.8, seed));
+    col = mix(mix(vec3(.5, .1, .05), vec3(.68, .3, .08), seed), vec3(.4, .24, .11), step(.6, seed));
     col *= (.85 + .2 * smoothstep(.08, 0., abs(sin(b * 3.5)) * r)) * (.9 + .2 * vnoise(uv * 6. + seed * 9.));
   } else {                                      // food pellet
     alpha = clamp((.85 - r) / aa + .5, 0., 1.);
@@ -91,26 +91,32 @@ void main() {
     return;
   }
   float s = shore(p);
-  if (s > 2.) discard;
+  if (s > 4.) discard;
   float m = min(u_res.x, u_res.y);
-  vec2 q = p / (m * .09);
-  vec2 n0 = floor(q), f = fract(q);
-  float d1 = 9.;
-  vec2 cell;
+  // packed, irregular stones: warped Voronoi, F2 - F1 gives the cracks between them
+  vec2 q = p / (m * .11) + .45 * vec2(vnoise(p / 37.), vnoise(p / 37. + 9.));
+  vec2 n0 = floor(q), f = fract(q), cell = vec2(0);
+  float d1 = 9., d2 = 9.;
   for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
-    vec2 g = vec2(i, j), c = g + .5 + (vec2(hash(n0 + g), hash(n0 + g + 7.)) - .5) * .7 - f;
-    float d = length(c);
-    if (d < d1) { d1 = d; cell = n0 + g; }
+    vec2 g = vec2(i, j), r = g + vec2(hash(n0 + g), hash(n0 + g + 7.)) * .9 - f;
+    float d = dot(r, r);
+    if (d < d1) { d2 = d1; d1 = d; cell = n0 + g; } else if (d < d2) d2 = d;
   }
-  float stone = smoothstep(.48, .38, d1) * smoothstep(-m * .12, -m * .02, s);   // coping stones only near the edge
-  vec3 earth = mix(vec3(.2, .17, .11), vec3(.24, .3, .13), smoothstep(.4, .7, fbm(p / 18.)));
-  vec3 rock = mix(vec3(.46, .45, .42), vec3(.38, .36, .32), hash(cell)) * (.8 + .3 * fbm(p / 6.));
-  rock = mix(rock, vec3(.25, .32, .14), smoothstep(.6, .75, fbm(p / 9. + 3.)) * .7);
+  float gap = sqrt(d2) - sqrt(d1), id = hash(cell + 3.);
+  float band = smoothstep(-m * .15, -m * .04, s);   // a row of coping stones along the water, sparser inland
+  float stone = smoothstep(.1, .26, gap) * step(id, .25 + .75 * band) * step(s, 2.5);
+  // height: rounded shoulders plus weathered facets; the normal comes from its screen derivatives
+  float hgt = smoothstep(.05, .5, gap) * (.7 + .3 * id) + .25 * fbm(p / 9. + id * 9.);
+  vec3 nrm = normalize(vec3(-dFdx(hgt) * 6., dFdy(hgt) * 6., 1.));
+  vec3 rock = mix(vec3(.46, .44, .4), vec3(.36, .34, .3), id) * (.82 + .3 * fbm(p / 5. + id * 4.));
+  rock = mix(rock, vec3(.72, .72, .64), smoothstep(.8, .86, vnoise(p / 1.8 + id * 30.)) * .5);   // lichen
+  rock = mix(rock, vec3(.24, .31, .13), smoothstep(.55, .7, fbm(p / 11. + 3. + id)) * .75);      // moss
+  vec3 earth = mix(vec3(.15, .13, .09), vec3(.2, .27, .11), smoothstep(.35, .65, fbm(p / 15.)));
+  earth = mix(earth, vec3(.5, .12, .05), smoothstep(.86, .9, vnoise(p / 3.5)) * .8);             // fallen momiji
   vec3 col = mix(earth, rock, stone);
-  vec3 nrm = normalize(vec3((f - .5) * stone * 1.2, 1.));
-  col *= mix(1., .6, smoothstep(-6., 1., s));   // damp near the water
-  vec3 rad = lin(col) * (SKY_E * .9 + SUN_E * max(dot(nrm, SUN), 0.) * canopy(p, 0.));
-  float a = smoothstep(2., 0., s);
+  col *= mix(1., .55, smoothstep(-5., 1.5, s));   // wet near the water
+  vec3 rad = lin(col) * (SKY_E * (.6 + .4 * nrm.z) + SUN_E * max(dot(nrm, SUN), 0.) * canopy(p, 0.));
+  float a = max(stone, step(s, 0.)) * smoothstep(4., 2.5, s);
   o = vec4(enc(rad) * a, a);
 }`;
 
