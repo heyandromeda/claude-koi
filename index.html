@@ -16,7 +16,8 @@
     font: 15px/1.3 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
   canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
   .ui { position: fixed; right: max(16px, env(safe-area-inset-right)); bottom: max(16px, env(safe-area-inset-bottom));
-    display: flex; gap: 10px; }
+    display: flex; gap: 10px; transition: opacity .8s; }
+  .ui.idle { opacity: .3; }
   .ui button { width: 44px; height: 44px; padding: 0; border-radius: 50%; display: grid; place-items: center; cursor: pointer;
     color: rgba(255, 255, 255, .85); background: rgba(10, 22, 16, .3); border: 1px solid rgba(255, 255, 255, .18);
     -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px); touch-action: manipulation; transition: transform .15s; }
@@ -143,7 +144,7 @@ void main() {
 let gl, R, quad;
 
 function initGL() {
-  const float = !!gl.getExtension('EXT_color_buffer_float');
+  const float = !params.has('ldr') && !!gl.getExtension('EXT_color_buffer_float');   // ?ldr tests the 8-bit fallback
   const h = hdr(float);
   quad = U.fullscreen(gl);
   R = {
@@ -261,6 +262,12 @@ function stop() { cancelAnimationFrame(raf); raf = 0; }
 const pos = e => { const r = canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
 let hinted = false;
 function dismissHint() { if (!hinted) { hinted = true; hint.classList.add('gone'); } }
+// the controls step back while you watch the pond, and return at a touch
+const ui = document.querySelector('.ui');
+let idleTimer = 0;
+function wake() { ui.classList.remove('idle'); clearTimeout(idleTimer); idleTimer = setTimeout(() => ui.classList.add('idle'), 4000); }
+document.addEventListener('pointerdown', wake, true);
+wake();
 
 canvas.addEventListener('pointerdown', e => {
   if (paused) return;
